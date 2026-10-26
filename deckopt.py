@@ -259,11 +259,14 @@ def resolve(cfg, state):
     return out, trail
 
 
-def best_refresh(fps, lo, hi):
-    """Lowest refresh rate in range that's a whole multiple of the fps cap: even frame pacing, least power."""
+def best_refresh(fps, lo, hi, highest=False):
+    """Refresh rate in range that's a whole multiple of the fps cap, for even frame pacing.
+
+    Lowest such rate by default (least power), highest with highest=True (least latency)."""
     if fps <= 0:
         return hi
-    for hz in range(lo, hi + 1):
+    rates = range(hi, lo - 1, -1) if highest else range(lo, hi + 1)
+    for hz in rates:
         if hz % fps == 0:
             return hz
     return hi
@@ -276,10 +279,10 @@ def finalize(settings, state, panel):
     if state.screen.internal:
         if isinstance(refresh, int):
             hz = clamp(refresh, lo, hi)
-        elif refresh == "max" or fps in ("refresh", "half"):
+        elif fps in ("refresh", "half"):
             hz = hi
-        else:  # "fps": match the panel to the frame cap
-            hz = best_refresh(int(fps), lo, hi)
+        else:  # "max" or "fps": a rate the frame cap divides evenly, so e.g. 60fps gets 60Hz, not a juddery 90Hz
+            hz = best_refresh(int(fps), lo, hi, highest=refresh == "max")
     else:
         hz = round(state.screen.refresh) or 60
     if fps == "refresh":
@@ -471,14 +474,26 @@ class Tuner:
 # --- CLI --------------------------------------------------------------------
 
 
+def deep_merge(base, over):
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
 def load_config(path):
+    """The bundled profiles (updated with DeckOpt) with the user's file layered on top."""
     path = Path(path)
+    bundled = Path(__file__).with_name("profiles.toml")
+    with open(bundled, "rb") as f:
+        cfg = tomllib.load(f)
     if not path.exists():
-        bundled = Path(__file__).with_name("profiles.toml")
         log.warning("%s not found, using %s", path, bundled)
-        path = bundled
-    with open(path, "rb") as f:
-        return tomllib.load(f), path
+        return cfg, bundled
+    if path.resolve() != bundled.resolve():
+        with open(path, "rb") as f:
+            cfg = deep_merge(cfg, tomllib.load(f))
+    return cfg, path
 
 
 def power_label(state):

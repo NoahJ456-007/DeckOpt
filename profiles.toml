@@ -4,8 +4,9 @@
 #   tdp       = 3..15            watts for the whole APU
 #   gpu_mhz   = "auto" | 200..1600   lock the GPU clock (auto = let the driver decide)
 #   fps       = 0 | number | "refresh" | "half"   frame cap (0 = unlimited, "refresh" = match the screen)
-#   refresh   = "max" | "fps" | number   built-in screen refresh rate
-#                ("fps" picks the lowest rate that's a multiple of the fps cap, e.g. 40fps -> 40Hz, 30fps -> 60Hz)
+#   refresh   = "max" | "fps" | number   built-in screen refresh rate. Both "max" and "fps" pick a rate
+#                the fps cap divides evenly (so 60fps never judders on the OLED's 90Hz):
+#                "max" = highest such rate (lowest latency), "fps" = lowest (saves power), e.g. 40fps -> 40Hz
 #   smt       = true | false     CPU hyperthreading
 #   cpu_boost = true | false     CPU turbo boost
 #
@@ -17,6 +18,9 @@
 #
 # Layers apply in this order, later ones win:
 #   profile -> display."<screen>" -> game."<id or name>" -> profile.low_battery -> game.<..>.low_battery
+#
+# This file only needs what you want to change: DeckOpt's built-in profiles (which updates add to)
+# sit underneath it, and anything set here wins.
 #
 # Run `deckopt status` while a game is running to see its AppId, your screen's name,
 # and exactly which layers were used. Edits are picked up live, no restart needed.
@@ -99,3 +103,21 @@ tdp = 15
 fps = 30
 [game.1091500.external]
 fps = 30
+
+[game.105600]            # Terraria: the game itself runs at a fixed 60fps
+fps = 60
+refresh = "fps"          # 60Hz on the OLED; 90Hz would judder
+tdp = 9
+[game.105600.battery]
+tdp = 6
+[game.105600.external]
+fps = 60
+
+[game.268910]            # Cuphead: fixed 60fps 2D, light
+fps = 60
+refresh = "fps"
+tdp = 9
+[game.268910.battery]
+tdp = 6
+[game.268910.external]
+fps = 60
