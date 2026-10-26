@@ -34,13 +34,13 @@ the background service, and puts three shortcuts on your desktop:
 | Shortcut | What it does |
 |---|---|
 | **Update DeckOpt** | Gets the latest version from GitHub (your profiles are kept) |
-| **DeckOpt Status** | Shows the detected game, power and screen, and the settings in use |
+| **DeckOpt Check** | Plain-English health check: did each setting actually apply during your last game, or did Steam override it? |
 | **Edit DeckOpt Profiles** | Opens your profiles file |
 
 Go back to Game Mode and play. It keeps running across reboots and SteamOS updates.
 
 **Using the shortcuts from Game Mode:** in Desktop Mode, open Steam → *Add a Game → Add a
-Non-Steam Game* and tick "Update DeckOpt" and "DeckOpt Status".
+Non-Steam Game* and tick "Update DeckOpt" and "DeckOpt Check".
 
 ## Update
 
@@ -95,6 +95,7 @@ game: ELDEN RING (1245620) | power: charger | screen: LG TV SSCR2 (DP-1 1920x108
 
 | | |
 |---|---|
+| `deckopt check` | Health check (✔/✘ per setting, and what to fix) |
 | `deckopt status` | Show what's detected and what's being applied |
 | `deckopt update` | Update to the latest version |
 | `deckopt edit` | Open your profiles |
@@ -104,6 +105,11 @@ game: ELDEN RING (1245620) | power: charger | screen: LG TV SSCR2 (DP-1 1920x108
 | `deckopt uninstall` | Remove it (keeps your profiles) |
 
 Open a new Konsole window after installing so the `deckopt` command is found.
+
+## Something not working?
+
+Double-click **DeckOpt Check** in Desktop Mode. It shows what happened during your last game: each setting
+is marked OK or BAD, with the reason and the fix. You don't need to be in the game when you run it.
 
 ## Notes
 
