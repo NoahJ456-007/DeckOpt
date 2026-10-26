@@ -52,6 +52,14 @@ Deck the moment any of these change:
   lock fairness), which can smooth out stutter in some games. Your original values come back if
   DeckOpt stops. Turn off with `memory_tweaks = false`.
 - **Re-applies everything after sleep**, since some settings reset when the Deck wakes up.
+- **Controller battery alerts**: DeckOpt Check shows your controller's battery (PlayStation, Bluetooth
+  Xbox, Switch controllers) and flags it when it's low.
+- **Faster polling for wired PlayStation and generic USB controllers** (1000Hz instead of 125-250Hz),
+  for less input lag. Xbox-style pads already poll fast.
+- **Lower lag on TVs and monitors**: adaptive sync (VRR) is switched on when the screen supports it.
+  Tearing (lowest lag, visible tear lines) is available with `allow_tearing = true`.
+- **Profiles per controller**: `[controller."GameSir"]` or `[controller."3537"]` (vendor id) settings
+  apply while that controller is in use.
 - **Keeps wireless controller dongles awake**: turns off USB power saving for them, a common cause of
   controllers dropping and reconnecting. Restored when DeckOpt stops.
 - **Optional docked charge limit**: set `docked_charge_limit = 80` and the battery stops at 80% while

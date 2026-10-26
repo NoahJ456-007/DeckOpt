@@ -20,6 +20,9 @@
 #   cpu_boost = true | false     CPU turbo boost
 #   cpu_epp   = "power" | "balance_power" | "balance_performance" | "performance"
 #                                how eagerly the CPU clocks up (SteamOS 3.7.5+)
+#   vrr       = true | false     adaptive sync on TVs/monitors that support it: frames show the moment
+#                                they're ready (less lag, no stutter). Leave unset to keep Steam's setting
+#   allow_tearing = true | false lowest possible lag, but visible tear lines. Off unless you turn it on
 #
 # Any profile table can have sub-tables for conditions:
 #   .battery / .ac               power source
@@ -28,6 +31,9 @@
 #                                or HDMI data with no fixed size, e.g. projectors)
 #   .deck / .controller / .kbm   what you're playing with: the Deck's own controls, a controller,
 #                                or keyboard and mouse (whichever was used last; ."ac+kbm" etc. work too)
+#
+# [controller."..."] tables apply while that controller is in use, matched by any part of its name or by
+# its vendor id ("3537" = GameSir, "045e" = Microsoft, "054c" = Sony). DeckOpt Check shows the name.
 #   ."battery+internal" etc.     both at once
 #   .low_battery                 on battery and below low_battery_percent
 #
@@ -47,6 +53,8 @@ low_battery_percent = 20
 user = "deck"
 gamescope_display = ":0"
 memory_tweaks = true     # CryoUtilities' recommended memory settings; originals restored if DeckOpt stops
+fast_controller_polling = true  # wired PlayStation/generic USB pads: 1000Hz instead of 125-250Hz
+                                # (re-plug the controller once). Xbox-style pads are already fast
 keep_controllers_awake = true  # turn off USB power saving for wireless controller dongles, a common
                                # cause of controllers disconnecting and reconnecting over and over
 docked_charge_limit = 0  # e.g. 80: stop charging at 80% while docked (TV/monitor + charger) to spare the
@@ -80,8 +88,13 @@ fps = 30
 
 [profile.external]
 fps = "auto"             # fit the cap to the monitor/TV's refresh rate so frames are evenly paced
+vrr = true               # adaptive sync if the TV/monitor supports it: less lag, smoother
 
-# [profile.tv]           # e.g. prefer a steady 30 on every TV
+# [profile.tv]           # e.g. prefer a steady 30 on every TV, or the lowest possible lag:
+# fps = 30
+# allow_tearing = true
+
+# [controller."3537"]     # e.g. a GameSir (vendor 3537) on the TV: steady 30 in heavy games
 # fps = 30
 #
 # [profile.monitor]      # e.g. let light games go higher on a high-refresh monitor

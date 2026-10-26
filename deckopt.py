@@ -41,9 +41,9 @@ PANELS = {
 TDP_RANGE = (3, 15)
 GPU_MHZ_RANGE = (200, 1600)
 SETTING_KEYS = {"tdp", "auto_tdp", "gpu_mhz", "fps", "adaptive_fps", "max_fps", "refresh", "smt", "cpu_boost",
-                "cpu_epp"}
+                "cpu_epp", "vrr", "allow_tearing"}
 DEFAULTS = {"tdp": 15, "auto_tdp": False, "gpu_mhz": "auto", "fps": 0, "adaptive_fps": False, "max_fps": 60,
-            "refresh": "max", "smt": True, "cpu_boost": True, "cpu_epp": None}
+            "refresh": "max", "smt": True, "cpu_boost": True, "cpu_epp": None, "vrr": None, "allow_tearing": None}
 
 # CryoUtilities' recommended memory settings (github.com/CryoByte33/steam-deck-utilities, internal/config.go).
 # The swap file resize it also recommends is left out: that's a one-off disk change, not a runtime setting.
@@ -101,6 +101,7 @@ class State:
     screen: Screen
     input: str = "deck"          # "deck" (built-in controls), "controller" or "kbm"
     input_name: str = ""
+    input_id: str = ""           # USB/Bluetooth vendor:product of that device, e.g. "3537:1022"
 
     @property
     def power(self):
@@ -208,7 +209,7 @@ def power_state():
         kind = read(dev + "/type")
         if kind == "Mains":
             ac = ac or read(dev + "/online") == "1"
-        elif kind == "Battery" and battery is None:
+        elif kind == "Battery" and battery is None and read(dev + "/scope") != "Device":  # not a controller's
             cap = read(dev + "/capacity", "")
             battery = int(cap) if cap.isdigit() else None
             charging = read(dev + "/status") in ("Charging", "Full")
@@ -321,7 +322,8 @@ def input_devices():
         else:
             kind = None              # headset buttons, media remotes...
         if kind:
-            devices.append({"name": name, "event": event.group(0), "kind": kind, "usb_id": (vendor, product)})
+            devices.append({"name": name, "event": event.group(0), "kind": kind, "usb_id": (vendor, product),
+                            "id": f"{vendor}:{product}"})
     # Controller dongles often add keyboard/mouse interfaces (for macros). Those belong to the controller,
     # so they must never count as, or be opened as, a keyboard or mouse.
     controller_ids = {d["usb_id"] for d in devices if d["kind"] == "controller"}
@@ -390,18 +392,41 @@ class InputWatcher:
                 del self.fds[event]
 
     def current(self):
-        """(kind, device name)."""
+        """(kind, device name, vendor:product)."""
         self.poll()
         now = time.monotonic()
         recent = {k: v for k, v in self.last_used.items() if now - v[0] < self.RECENT}
         if recent:
             kind = max(recent, key=lambda k: recent[k][0])
-            return kind, recent[kind][1]
+            dev = next((d for d in self.devices if d["name"] == recent[kind][1]), {})
+            return kind, recent[kind][1], dev.get("id", "")
         for kind in ("controller", "kbm"):
             dev = next((d for d in self.devices if d["kind"] == kind), None)
             if dev:
-                return kind, dev["name"]
-        return "deck", "Steam Deck controls"
+                return kind, dev["name"], dev["id"]
+        return "deck", "Steam Deck controls", "28de:1205"
+
+
+def controller_batteries():
+    """Batteries of connected controllers: power supplies with scope "Device" (DualShock/DualSense, Xbox
+    over Bluetooth, Switch controllers...). Returns dicts: name, percent (or None), level, charging."""
+    found = []
+    for dev in sorted(glob.glob(sysfs("/sys/class/power_supply/*"))):
+        if read(dev + "/scope") != "Device" or read(dev + "/type") != "Battery":
+            continue
+        cap = read(dev + "/capacity", "")
+        found.append({
+            "name": read(dev + "/model_name") or Path(dev).name,
+            "percent": int(cap) if cap.isdigit() else None,
+            "level": read(dev + "/capacity_level", ""),
+            "charging": read(dev + "/status") in ("Charging", "Full"),
+        })
+    return found
+
+
+def battery_is_low(b):
+    return not b["charging"] and ((b["percent"] is not None and b["percent"] <= 20)
+                                  or b["level"] in ("Low", "Critical"))
 
 
 def detect(cfg, names, was_low, inputs=None):
@@ -413,8 +438,8 @@ def detect(cfg, names, was_low, inputs=None):
     appid = running_appid()
     if inputs is None:
         inputs = InputWatcher()
-    kind, device = inputs.current()
-    return State(appid, names.get(appid), ac, battery, low, active_screen(screens()), kind, device)
+    kind, device, device_id = inputs.current()
+    return State(appid, names.get(appid), ac, battery, low, active_screen(screens()), kind, device, device_id)
 
 
 # --- Profile resolution -----------------------------------------------------
@@ -427,6 +452,17 @@ def find_table(tables, *keys):
     for key in keys:
         if key is not None and str(key).lower() in lowered:
             return lowered[str(key).lower()]
+    return None, None
+
+
+def find_controller(tables, state):
+    """[controller."..."] tables match the controller's name (any part of it, any case) or its vendor id,
+    alone ("3537") or with the product ("3537:1022"). The id is handy when the name is generic, like a
+    GameSir in Xbox mode showing up as "Generic X-Box pad"."""
+    for key, table in (tables or {}).items():
+        k = str(key).lower()
+        if k in state.input_name.lower() or k in (state.input_id, state.input_id.split(":")[0]):
+            return key, table
     return None, None
 
 
@@ -453,6 +489,9 @@ def resolve(cfg, state):
     merge_layer(cfg.get("profile"), state, "profile", out, trail)
     key, table = find_table(cfg.get("display"), state.screen.name, state.screen.connector)
     merge_layer(table, state, f'display."{key}"', out, trail)
+    if state.input == "controller":
+        key, table = find_controller(cfg.get("controller"), state)
+        merge_layer(table, state, f'controller."{key}"', out, trail)
     game_key, game = find_table(cfg.get("game"), state.appid, state.game)
     merge_layer(game, state, f'game."{game_key}"', out, trail)
     if state.low_battery:
@@ -522,6 +561,8 @@ def finalize(settings, state, panel):
         "smt": bool(settings["smt"]),
         "cpu_boost": bool(settings["cpu_boost"]),
         "cpu_epp": settings["cpu_epp"],
+        "vrr": settings["vrr"],                # None = leave Steam's setting alone
+        "allow_tearing": settings["allow_tearing"],
     }
 
 
@@ -541,6 +582,7 @@ class Tuner:
         self.originals = {}  # path -> value before DeckOpt first changed it, put back on stop
         self.charge_limit_on = False
         self.awake = set()  # controllers whose USB power saving is already handled
+        self.atom_originals = {}  # Game Mode switches (VRR, tearing) -> (env, Steam's value)
 
     def warn_once(self, key, msg, *args):
         if key not in self.warned:
@@ -640,6 +682,16 @@ class Tuner:
         if errors:
             log.warning("memory tweaks: %s", errors[0])
 
+    def fast_controller_polling(self):
+        """Ask USB HID gamepads (wired PlayStation and generic pads) for input every 1ms instead of their
+        default 4-8ms. Xbox-style pads (xpad driver, including GameSir in Xbox mode) already poll fast and
+        aren't affected. Takes effect for controllers plugged in after this; restored when DeckOpt stops."""
+        path = sysfs("/sys/module/usbhid/parameters/jspoll")
+        if not os.path.exists(path):
+            return {"ok": None, "detail": "not available on this system"}
+        err = self.write_restorable(path, "1")
+        return {"ok": not err, "detail": err or "1000Hz for wired USB pads (re-plug to apply)"}
+
     def keep_controllers_awake(self, devices):
         """Stops USB power saving on wireless controller dongles: a classic cause of a controller
         dropping and reconnecting over and over. The original setting is put back when DeckOpt stops."""
@@ -730,6 +782,20 @@ class Tuner:
                                    "-set", "GAMESCOPE_FPS_LIMIT", str(fps))
         return (None, "xprop") if not err2 else (f"{err}; {err2}", None)
 
+    def set_display_flag(self, env, key, atom, value, on_label):
+        """Game Mode switches that stay put once set (VRR, tearing), unlike the frame cap. Steam's own
+        value is remembered and put back when DeckOpt stops."""
+        if value is None:
+            return
+        if self.dry_run:
+            return self.note(key, True, on_label if value else "off")
+        if atom not in self.atom_originals:
+            _, out = self.run_as_user(env, "xprop", "-root", atom)
+            m = re.search(r"=\s*(\d+)", out)
+            self.atom_originals[atom] = (env, int(m.group(1)) if m else 0)
+        err, _ = self.run_as_user(env, "xprop", "-root", "-f", atom, "32c", "-set", atom, str(int(bool(value))))
+        self.note(key, not err, err or (on_label if value else "off"))
+
     def apply(self, final):
         self.results = {}
         self.set_tdp(final["tdp"])
@@ -742,6 +808,9 @@ class Tuner:
             self.note("fps", None, "only works in Game Mode")
             self.note("refresh", None, "only works in Game Mode")
             return
+        self.set_display_flag(env, "vrr", "GAMESCOPE_VRR_ENABLED", final.get("vrr"), "on (if the screen supports it)")
+        self.set_display_flag(env, "allow_tearing", "GAMESCOPE_ALLOW_TEARING", final.get("allow_tearing"),
+                              "allowed (lowest lag)")
         err, method = self.send_fps(env, final["fps"])
         self.note("fps", not err, err or final["fps"] or "unlimited")
         if err:
@@ -771,6 +840,9 @@ class Tuner:
             err, _ = self.send_fps(env, final["fps"])
             if err:
                 problems.append(f"Couldn't re-send the FPS cap: {err}")
+            for key, atom in (("vrr", "GAMESCOPE_VRR_ENABLED"), ("allow_tearing", "GAMESCOPE_ALLOW_TEARING")):
+                if final.get(key) is not None and self.results.get(key, {}).get("ok"):
+                    self.run_as_user(env, "xprop", "-root", "-f", atom, "32c", "-set", atom, str(int(final[key])))
         return problems
 
     def restore(self):
@@ -778,6 +850,8 @@ class Tuner:
         self.apply({**DEFAULTS, "fps": 0, "refresh": None})
         for path, value in self.originals.items():  # memory tweaks, CPU energy preference, charge limit
             self.write(path, value)
+        for atom, (env, value) in self.atom_originals.items():  # VRR, tearing
+            self.run_as_user(env, "xprop", "-root", "-f", atom, "32c", "-set", atom, str(value))
 
 
 def cpu_times():
@@ -1186,6 +1260,9 @@ def cmd_run(args):
         if cfg.get("settings", {}).get("memory_tweaks", False):
             tuner.apply_memory_tweaks()
             status["memory"] = tuner.memory_result
+        if cfg.get("settings", {}).get("fast_controller_polling", False):
+            status["polling"] = tuner.fast_controller_polling()
+        warned_batteries = set()
         if boottime is not None:
             sleep_gap = time.clock_gettime(boottime) - time.monotonic()
         while True:
@@ -1210,6 +1287,17 @@ def cmd_run(args):
             state = detect(cfg, names, low, inputs)
             if settings.get("keep_controllers_awake", True):
                 tuner.keep_controllers_awake(inputs.devices)
+            batteries = controller_batteries()
+            for b in batteries:
+                if battery_is_low(b) and b["name"] not in warned_batteries:
+                    warned_batteries.add(b["name"])
+                    log.warning("controller battery low: %s %s", b["name"], f"{b['percent']}%" if b["percent"] is not None else b["level"])
+                elif not battery_is_low(b):
+                    warned_batteries.discard(b["name"])
+            if batteries != status.get("controller_batteries"):
+                status["controller_batteries"] = batteries
+                if status["current"]:
+                    save_state(status)
             low = state.low_battery
             key = (state.appid, state.ac, state.low_battery, state.screen, state.input)
             now = time.monotonic()
@@ -1327,7 +1415,8 @@ def cmd_check(args):
     print(color(1, f"{'While playing ' + rec['game'] if rec['game'] else 'Last update'} ({ago(rec['time'])}, {where}):"))
     print(f"      {rec['power']}, {rec['screen']}, {rec.get('input', '')}")
     labels = [("tdp", "Power limit"), ("gpu", "GPU clock"), ("fps", "FPS cap"), ("refresh", "Refresh rate"),
-              ("smt", "Hyperthreading"), ("cpu_boost", "CPU boost"), ("cpu_epp", "CPU power preference")]
+              ("smt", "Hyperthreading"), ("cpu_boost", "CPU boost"), ("cpu_epp", "CPU power preference"),
+              ("vrr", "VRR (adaptive sync)"), ("allow_tearing", "Tearing")]
     for key, label in labels:
         r = rec["results"].get(key)
         if r:
@@ -1336,6 +1425,12 @@ def cmd_check(args):
         line(False, p)
     if data.get("memory"):
         line(data["memory"]["ok"], f"Memory tweaks: {data['memory']['detail']}")
+    if data.get("polling"):
+        line(data["polling"]["ok"], f"Controller polling: {data['polling']['detail']}")
+    for b in controller_batteries():  # live, not from the record
+        amount = f"{b['percent']}%" if b["percent"] is not None else (b["level"] or "unknown").lower()
+        extra = " (charging)" if b["charging"] else " - low, charge it soon" if battery_is_low(b) else ""
+        line(not battery_is_low(b), f"Controller battery: {b['name']} {amount}{extra}")
     if rec["game"] and not rec["game_mode"]:
         line(False, "Game Mode wasn't detected, so the FPS cap and refresh rate were skipped")
     if not data.get("last_game"):
