@@ -12,6 +12,13 @@ Deck the moment any of these change:
 
 ### Every game is optimized, profile or not
 
+- **Adaptive 60 FPS on the charger.** DeckOpt reads the game's real frame times from Game Mode (the same
+  data as Steam's performance overlay). If the game holds 60, it stays at 60. If it can't, the cap
+  steps down to the next evenly paced level (60 → 45 → 40 → 30 on the built-in screen, 60 → 30 on a
+  60Hz TV), so you get smooth, steady frames instead of a stuttery 52. When the game runs comfortably
+  with GPU to spare it tries the next level up, backing off for longer each time that doesn't hold.
+  Where each game settles is remembered. (Needs a SteamOS with gamescope 3.16.20 or newer; on older
+  versions the cap simply stays at 60.)
 - **Automatic power tuning on battery.** DeckOpt watches GPU and CPU load. If the game is easily
   hitting its frame cap, the power limit steps down until it's just keeping up; if the GPU or a CPU
   core maxes out, it steps back up fast. The result is remembered per game, power source and screen,

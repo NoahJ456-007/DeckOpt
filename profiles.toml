@@ -10,6 +10,10 @@
 #                (60Hz TV -> 60, 144Hz monitor -> 48, 165Hz -> 55). On a TV or monitor, a number
 #                is also nudged to an even fit when one is close (40 on a 144Hz monitor -> 36)
 #   max_fps   = number            ceiling for fps = "auto" (default 60)
+#   adaptive_fps = true | false  start at the fps cap and, if the game can't hold it, step down to the next
+#                                evenly paced cap (60 -> 45 -> 40 -> 30 built-in, 60 -> 30 on a 60Hz TV);
+#                                step back up when it runs comfortably. Measures real frame times
+#                                (gamescope 3.16.20+) and remembers where each game settles
 #   (refresh rate: Game Mode sets the built-in screen to the highest rate the fps cap divides evenly,
 #    e.g. 40fps -> 80Hz and 60fps -> 60Hz on the OLED, just like Steam's own framerate slider)
 #   smt       = true | false     CPU hyperthreading
@@ -58,6 +62,10 @@ refresh = "max"
 smt = true
 cpu_boost = true
 cpu_epp = "balance_performance"
+
+[profile.ac]               # on the charger: aim for 60, settle lower only if the game can't keep up
+fps = 60
+adaptive_fps = true
 
 [profile.battery]
 tdp = 10                 # with auto_tdp this is the ceiling; light games settle lower on their own
@@ -118,18 +126,14 @@ tdp = 4
 fps = 60
 refresh = "max"
 
-[game.1245620]           # Elden Ring: heavy, prioritise stable frame pacing
-fps = 40
-refresh = "fps"
+[game.1245620]           # Elden Ring: heavy; on the charger adaptive FPS finds the level it can hold
 [game.1245620.battery]
 tdp = 13
 fps = 30
 [game.1245620.external]
 fps = 30
 
-[game.1091500]           # Cyberpunk 2077: needs full power everywhere
-fps = 40
-refresh = "fps"
+[game.1091500]           # Cyberpunk 2077: needs full power everywhere; adaptive FPS on the charger
 [game.1091500.battery]
 tdp = 15
 fps = 30

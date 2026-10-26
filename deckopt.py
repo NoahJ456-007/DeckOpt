@@ -19,6 +19,7 @@ import pwd
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -39,9 +40,10 @@ PANELS = {
 }
 TDP_RANGE = (3, 15)
 GPU_MHZ_RANGE = (200, 1600)
-SETTING_KEYS = {"tdp", "auto_tdp", "gpu_mhz", "fps", "max_fps", "refresh", "smt", "cpu_boost", "cpu_epp"}
-DEFAULTS = {"tdp": 15, "auto_tdp": False, "gpu_mhz": "auto", "fps": 0, "max_fps": 60, "refresh": "max",
-            "smt": True, "cpu_boost": True, "cpu_epp": None}
+SETTING_KEYS = {"tdp", "auto_tdp", "gpu_mhz", "fps", "adaptive_fps", "max_fps", "refresh", "smt", "cpu_boost",
+                "cpu_epp"}
+DEFAULTS = {"tdp": 15, "auto_tdp": False, "gpu_mhz": "auto", "fps": 0, "adaptive_fps": False, "max_fps": 60,
+            "refresh": "max", "smt": True, "cpu_boost": True, "cpu_epp": None}
 
 # CryoUtilities' recommended memory settings (github.com/CryoByte33/steam-deck-utilities, internal/config.go).
 # The swap file resize it also recommends is left out: that's a one-off disk change, not a runtime setting.
@@ -513,6 +515,7 @@ def finalize(settings, state, panel):
     return {
         "tdp": clamp(settings["tdp"], *TDP_RANGE),
         "auto_tdp": bool(settings["auto_tdp"]),
+        "adaptive_fps": bool(settings["adaptive_fps"]),
         "gpu_mhz": "auto" if gpu == "auto" else clamp(gpu, *GPU_MHZ_RANGE),
         "fps": max(0, int(fps)),
         "refresh": hz if state.screen.internal else None,  # gamescope drives external refresh itself
@@ -839,11 +842,203 @@ class AutoTDP:
         if new == self.current:
             return None
         self.current = self.learned[self.key] = new
+        self.save()
+        return new
+
+    def save(self):
         try:
             self.path.write_text(json.dumps(self.learned, indent=1))
         except OSError as e:
-            log.debug("could not save learned limits: %s", e)
-        return new
+            log.debug("could not save learned settings: %s", e)
+
+
+def pack_string(text):
+    raw = text.encode() + b"\0"
+    return struct.pack("<I", len(raw)) + raw + b"\0" * (-len(raw) % 4)
+
+
+def unpack_string(payload, offset):
+    length, = struct.unpack_from("<I", payload, offset)
+    text = payload[offset + 4:offset + 4 + length - 1].decode(errors="replace")
+    return text, offset + 4 + length + (-length % 4)
+
+
+class GamescopePerf:
+    """Reads a game's real frame times from gamescope (3.16.20+), the data Steam's overlay is built on.
+
+    A minimal Wayland client written against the wire protocol directly, so nothing extra needs installing:
+    get the registry, bind gamescope_control (version 6+), then send request_app_performance_stats(appid);
+    gamescope answers with app_performance_stats on the game's next frame."""
+
+    STATS_REQUEST, STATS_EVENT = 6, 3  # opcodes in gamescope-control.xml
+
+    def __init__(self, socket_path):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(1.0)
+        self.sock.connect(socket_path)
+        self.buf = b""
+        self.send(1, 1, struct.pack("<I", 2))  # wl_display.get_registry -> registry is object 2
+        self.send(1, 0, struct.pack("<I", 3))  # wl_display.sync -> callback 3 fires once globals are listed
+        control = None
+        while True:
+            obj, opcode, payload = self.receive()
+            if obj == 2 and opcode == 0:  # wl_registry.global(name, interface, version)
+                name, = struct.unpack_from("<I", payload)
+                interface, offset = unpack_string(payload, 4)
+                version, = struct.unpack_from("<I", payload, offset)
+                if interface == "gamescope_control":
+                    control = (name, version)
+            elif obj == 3:
+                break
+        if not control or control[1] < 6:
+            self.close()
+            raise OSError("this gamescope is too old to report frame times (needs 3.16.20+)")
+        # wl_registry.bind(name, interface, version, new id 4)
+        self.send(2, 0, struct.pack("<I", control[0]) + pack_string("gamescope_control") + struct.pack("<II", 6, 4))
+
+    def send(self, obj, opcode, payload=b""):
+        self.sock.sendall(struct.pack("<II", obj, (8 + len(payload)) << 16 | opcode) + payload)
+
+    def receive(self):
+        while True:
+            if len(self.buf) >= 8:
+                obj, size_op = struct.unpack_from("<II", self.buf)
+                size = size_op >> 16
+                if len(self.buf) >= size:
+                    payload, self.buf = self.buf[8:size], self.buf[size:]
+                    if obj == 1 and size_op & 0xFFFF == 0:  # wl_display.error
+                        raise OSError(f"gamescope protocol error: {unpack_string(payload, 8)[0]}")
+                    return obj, size_op & 0xFFFF, payload
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise OSError("gamescope closed the connection")
+            self.buf += chunk
+
+    def fps(self, appid, budget=0.5):
+        """Average frame rate over a short burst of frame-time samples, or None if the game isn't drawing."""
+        times, deadline = [], time.monotonic() + budget
+        while time.monotonic() < deadline and len(times) < 20:
+            self.send(4, self.STATS_REQUEST, struct.pack("<I", int(appid) & 0xFFFFFFFF))
+            self.sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                while True:
+                    obj, opcode, payload = self.receive()
+                    if obj == 4 and opcode == self.STATS_EVENT:
+                        _, lo, hi = struct.unpack_from("<III", payload)
+                        times.append(hi << 32 | lo)
+                        break
+            except socket.timeout:
+                break
+        times = sorted(t for t in times if t > 0)
+        return 1e9 / times[len(times) // 2] if times else None
+
+    def close(self):
+        self.sock.close()
+
+
+def fps_ladder(top, state, panel, floor=30):
+    """Evenly paced caps from `top` down: each has a refresh rate it divides exactly.
+    OLED: 60 -> 45 -> 40 -> 30; LCD: 60 -> 45 -> 40 -> 30; 60Hz TV: 60 -> 30; 120Hz: 60 -> 40 -> 30."""
+    if state.screen.internal:
+        lo, hi = panel["refresh"]
+        steps = [top] + [f for f in (60, 45, 40, 30) if f < top]
+        steps = [f for f in steps if any(hz % f == 0 for hz in range(lo, hi + 1))]
+    else:
+        hz = state.screen.refresh or 60
+        steps = [top] + [round(hz / n) for n in range(1, 13)
+                         if abs(hz / n - round(hz / n)) < 0.1 and floor - 5 <= round(hz / n) < top]
+    return sorted(set(steps), reverse=True)
+
+
+class AdaptiveFPS:
+    """While plugged in: aim for the profile's cap (60 by default). If the game can't hold it, step down to
+    the next evenly paced cap; once it sits comfortably at a lower cap with GPU to spare, try one step up,
+    and back off for a while if that doesn't hold. Uses real frame times from gamescope. The level each
+    game settles at is remembered per power source and screen."""
+
+    WARMUP, WINDOW, UP_AFTER, COOLDOWN = 30, 10, 60, 300  # seconds
+
+    def __init__(self, tuner, learned, save):
+        self.tuner, self.learned, self.save = tuner, learned, save
+        self.perf, self.perf_error, self.perf_retry = None, None, 0.0
+        self.begin(None, None, None)
+
+    def begin(self, key, appid, ladder):
+        self.key, self.appid, self.ladder = key, appid, ladder
+        if key:
+            remembered = self.learned.get(key)
+            self.cap = remembered if remembered in ladder else ladder[0]
+        now = time.monotonic()
+        self.readings, self.gpu = [], []
+        self.started = self.last_change = self.last_decision = now
+        self.low_windows, self.trial_from, self.cooldown_until, self.failures = 0, None, {}, {}
+        self.measured = None
+
+    def connect(self, env):
+        if self.perf or time.monotonic() < self.perf_retry:
+            return self.perf
+        path = Path(env.get("XDG_RUNTIME_DIR", "/run/user/1000"), env.get("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0"))
+        try:
+            self.perf, self.perf_error = GamescopePerf(sysfs(str(path))), None
+        except OSError as e:
+            self.perf, self.perf_error, self.perf_retry = None, str(e), time.monotonic() + 60
+            log.warning("adaptive FPS can't read frame times: %s", e)
+        return self.perf
+
+    def sample(self, env):
+        """Call every poll. Returns a new cap when it should change, else None."""
+        if not self.key or not env or not self.connect(env):
+            return None
+        try:
+            fps = self.perf.fps(self.appid)
+        except OSError as e:
+            log.debug("frame time read failed: %s", e)
+            self.perf.close()
+            self.perf = None
+            return None
+        now = time.monotonic()
+        if fps:
+            self.readings.append((now, fps))
+        hwmon = self.tuner.amdgpu_hwmon()
+        busy = read(self.tuner.gpu_device(hwmon) / "gpu_busy_percent", "") if hwmon else ""
+        if busy.isdigit():
+            self.gpu.append((now, int(busy)))
+        if now - self.started < self.WARMUP or now - self.last_decision < self.WINDOW:
+            return None
+        self.last_decision = now
+        recent = sorted(f for t, f in self.readings if now - t <= self.WINDOW)
+        gpu = [g for t, g in self.gpu if now - t <= self.WINDOW]
+        self.readings = [(t, f) for t, f in self.readings if now - t <= self.WINDOW]
+        self.gpu = [(t, g) for t, g in self.gpu if now - t <= self.WINDOW]
+        if len(recent) < 3:
+            return None  # paused, loading, or not drawing
+        self.measured = recent[len(recent) // 2]
+        i = self.ladder.index(self.cap)
+        if self.measured < self.cap * 0.9:
+            self.low_windows += 1
+            if self.low_windows >= 2 and i + 1 < len(self.ladder):
+                if self.trial_from is not None and now - self.last_change < 2 * self.UP_AFTER:
+                    # The step up didn't hold. Wait before trying again, twice as long after each failure,
+                    # so a game that really can't hold it isn't put through a rough patch every few minutes.
+                    fails = self.failures[self.cap] = self.failures.get(self.cap, 0) + 1
+                    self.cooldown_until[self.cap] = now + self.COOLDOWN * 2 ** (fails - 1)
+                self.trial_from = None
+                return self.change(self.ladder[i + 1], f"averaging {self.measured:.0f}")
+            return None
+        self.low_windows = 0
+        headroom = gpu and sum(gpu) / len(gpu) < 80
+        if (i > 0 and now - self.last_change >= self.UP_AFTER and self.measured >= self.cap * 0.97 and headroom
+                and self.cooldown_until.get(self.ladder[i - 1], 0) < now):
+            self.trial_from = self.cap
+            return self.change(self.ladder[i - 1], "steady with GPU to spare, trying higher")
+        return None
+
+    def change(self, cap, why):
+        log.info("adaptive FPS: %d -> %d (%s)", self.cap, cap, why)
+        self.cap, self.last_change, self.low_windows, self.measured = cap, time.monotonic(), 0, None
+        self.learned[self.key] = cap
+        self.save()
+        return cap
 
 
 # --- CLI --------------------------------------------------------------------
@@ -923,6 +1118,24 @@ STATE_FILE = Path(os.environ.get("DECKOPT_STATE") or Path(__file__).with_name("s
 LEARNED_FILE = STATE_FILE.with_name("learned.json")
 
 
+def set_cap(final, state, panel, adaptive):
+    final["fps"] = adaptive.cap
+    if state.screen.internal:
+        lo, hi = panel["refresh"]
+        final["refresh"] = best_refresh(adaptive.cap, lo, hi, highest=True)
+
+
+def note_adaptive(tuner, final, adaptive):
+    r = tuner.results.get("fps")
+    if not adaptive.key or not r or not r["ok"]:
+        return
+    if adaptive.perf_error:
+        r["detail"] = f"{final['fps']} (adaptive is off: {adaptive.perf_error})"
+        return
+    measured = f", game running at {adaptive.measured:.0f}" if adaptive.measured else ""
+    r["detail"] = f"{final['fps']} (adaptive, aiming for {adaptive.ladder[0]}{measured})"
+
+
 def note_auto(tuner, final):
     if "tdp_max" in final and tuner.results.get("tdp", {}).get("ok"):
         tuner.results["tdp"]["detail"] = f"{final['tdp']}W (auto-tuned, up to {final['tdp_max']}W)"
@@ -956,6 +1169,7 @@ def cmd_run(args):
     names = GameNames(cfg.get("settings", {}).get("user", "deck"))
     tuner = Tuner(cfg, args.dry_run)
     auto = AutoTDP(tuner, cfg.get("settings", {}), LEARNED_FILE)
+    adaptive = AdaptiveFPS(tuner, auto.learned, auto.save)
     inputs = InputWatcher()
     panel = panel_info()
     log.info("DeckOpt started (%s panel, config %s)", panel["model"], path)
@@ -1013,6 +1227,14 @@ def cmd_run(args):
                     final["tdp"] = auto.current
                 else:
                     auto.begin(None, None)
+                env = tuner.gamescope_env()
+                if final["adaptive_fps"] and state.appid and env and final["fps"] > 0:
+                    if changed or adaptive.key is None:
+                        key_name = f"fps|{state.appid}|{state.power}|{state.where}"
+                        adaptive.begin(key_name, state.appid, fps_ladder(final["fps"], state, panel))
+                    set_cap(final, state, panel, adaptive)
+                else:
+                    adaptive.begin(None, None, None)
                 if changed:
                     log.info(summarize(state, final, trail))
                     knobs = f"{final['tdp']}W, {final['fps'] or 'unlimited'} FPS"
@@ -1021,12 +1243,24 @@ def cmd_run(args):
                         f"{state.screen.name} | {INPUT_LABELS[state.input]} -> {knobs}"])[-8:]
                 tuner.apply(final)
                 note_auto(tuner, final)
+                note_adaptive(tuner, final, adaptive)
                 for key_name, r in tuner.results.items():
                     if r["ok"] is False:
                         log.warning("%s not applied: %s", key_name, r["detail"])
                 settled, applied_at, last = not changed, now, key
                 verified_at = 0.0 if resettle else now  # check right after the settle pass
                 record(status, state, final, tuner, [])
+            new_cap = adaptive.sample(tuner.gamescope_env())
+            if new_cap is not None:
+                set_cap(final, state, panel, adaptive)
+                err, _ = tuner.send_fps(tuner.gamescope_env() or {}, final["fps"])
+                tuner.note("fps", not err, err or final["fps"])
+                if final["refresh"]:
+                    tuner.note("refresh", True, f"{final['refresh']}Hz (Game Mode matches it to the FPS cap)")
+                note_adaptive(tuner, final, adaptive)
+                record(status, state, final, tuner, status["current"]["problems"])
+            elif adaptive.key and adaptive.measured and tuner.results.get("fps", {}).get("ok"):
+                note_adaptive(tuner, final, adaptive)  # keep the measured frame rate in the check fresh
             new_tdp = auto.sample()
             if new_tdp is not None:
                 log.info("auto power limit for %s: %dW -> %dW", game_label(state), final["tdp"], new_tdp)
