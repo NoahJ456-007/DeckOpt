@@ -147,7 +147,8 @@ def power_state():
             cap = read(dev + "/capacity", "")
             battery = int(cap) if cap.isdigit() else None
             charging = read(dev + "/status") in ("Charging", "Full")
-    return ac or charging, battery
+    # No battery at all means wall power.
+    return ac or charging or battery is None, battery
 
 
 def running_appid():

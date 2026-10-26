@@ -81,7 +81,7 @@ case "\${1:-status}" in
     update)    exec bash "\$APP/install.sh" update ;;
     uninstall) exec sudo bash "\$APP/install.sh" uninstall ;;
     edit)      exec xdg-open "\$CONFIG" ;;
-    log|logs)  exec journalctl -u deckopt -f -o cat ;;
+    log|logs)  exec sudo journalctl -u deckopt -f -o cat ;;
     restart)   exec sudo systemctl restart deckopt ;;
     version)   cat "\$APP/VERSION" 2>/dev/null || echo unknown ;;
     apply)     shift; exec sudo python3 "\$APP/deckopt.py" apply -c "\$CONFIG" "\$@" ;;
@@ -141,7 +141,7 @@ case $CMD in
                 fi
             fi
             ensure_sudo_password
-            say "Enter your password to install (nothing shows while you type)."
+            sudo -n true 2>/dev/null || say "Enter your password to install (nothing shows while you type)."
             exec sudo bash "$SRC/install.sh" install
         fi
         [[ -f $SRC/deckopt.py ]] || fetch_latest   # piped straight into `sudo bash`
