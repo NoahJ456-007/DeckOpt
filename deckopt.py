@@ -15,6 +15,7 @@ import glob
 import json
 import logging
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -474,16 +475,13 @@ def even_fps(hz, limit, min_ratio):
 def finalize(settings, state, panel):
     """Turn symbolic values ("refresh", "max", "auto", ...) into concrete numbers for this screen."""
     lo, hi = panel["refresh"]
-    fps, refresh = settings["fps"], settings["refresh"]
+    fps = settings["fps"]
     if state.screen.internal and fps == "auto":
         fps = min(int(settings["max_fps"]), hi)
     if state.screen.internal:
-        if isinstance(refresh, int):
-            hz = clamp(refresh, lo, hi)
-        elif fps in ("refresh", "half"):
-            hz = hi
-        else:  # "max" or "fps": a rate the frame cap divides evenly, so e.g. 60fps gets 60Hz, not a juddery 90Hz
-            hz = best_refresh(int(fps), lo, hi, highest=refresh == "max")
+        # Game Mode sets the refresh rate itself: the highest rate the frame cap divides evenly, so
+        # 40fps -> 80Hz and 60fps -> 60Hz on the OLED (no judder). The `refresh` setting is no longer used.
+        hz = hi if fps in ("refresh", "half") else best_refresh(int(fps), lo, hi, highest=True)
     else:
         # External screens keep their own refresh rate, so fit the frame cap to it instead.
         hz = state.screen.refresh or 60
@@ -638,10 +636,14 @@ class Tuner:
             self.charge_limit_on = False
             log.info("undocked: charge limit back to normal")
 
-    # Gamescope (Game Mode) properties, set on Steam's X display.
+    # Game Mode (gamescope). The frame cap goes through gamescope's control protocol, the same channel as
+    # Steam's own framerate slider: `gamescopectl debug_set_fps_limit N` (gamescope 3.15+, SteamOS 3.6+).
+    # Gamescope recomputes the limit from that every frame, so the old GAMESCOPE_FPS_LIMIT /
+    # GAMESCOPE_DYNAMIC_REFRESH X properties get overwritten straight away; they're only a fallback for
+    # older gamescope versions that don't have gamescopectl.
 
     def gamescope_env(self):
-        """DISPLAY/XAUTHORITY of the Game Mode session, or None when not in Game Mode."""
+        """Environment for talking to the Game Mode session, or None when not in Game Mode."""
         in_game_mode = False
         steam_env = None
         for pid_dir in glob.glob(sysfs("/proc/[0-9]*")):
@@ -655,39 +657,46 @@ class Tuner:
                     continue
                 env = dict(kv.decode(errors="replace").split("=", 1) for kv in raw if b"=" in kv)
                 if "DISPLAY" in env:
-                    steam_env = {k: env[k] for k in ("DISPLAY", "XAUTHORITY") if k in env}
+                    keys = ("DISPLAY", "XAUTHORITY", "GAMESCOPE_WAYLAND_DISPLAY", "XDG_RUNTIME_DIR")
+                    steam_env = {k: env[k] for k in keys if k in env}
         if not in_game_mode:
             return None
-        return steam_env or {"DISPLAY": self.display}
+        env = steam_env or {"DISPLAY": self.display}
+        if "XDG_RUNTIME_DIR" not in env:
+            try:
+                env["XDG_RUNTIME_DIR"] = f"/run/user/{pwd.getpwnam(self.user).pw_uid}"
+            except KeyError:
+                pass
+        return env
 
-    def xprop(self, env, *args):
-        """Runs xprop on the Game Mode display. Returns (error or None, stdout)."""
-        if not shutil.which("xprop"):
-            return "xprop is not installed", ""
-        cmd = ["env"] + [f"{k}={v}" for k, v in env.items()] + ["xprop", "-root", *args]
+    def run_as_user(self, env, *cmd):
+        """Runs a command in the user's Game Mode session. Returns (error or None, stdout)."""
+        if not shutil.which(cmd[0]):
+            return f"{cmd[0]} is not installed", ""
+        full = ["env"] + [f"{k}={v}" for k, v in env.items()] + list(cmd)
         if os.geteuid() == 0:
-            cmd = ["runuser", "-u", self.user, "--"] + cmd
+            full = ["runuser", "-u", self.user, "--"] + full
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(full, capture_output=True, text=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired) as e:
             return str(e), ""
         if res.returncode:
-            return res.stderr.strip() or f"xprop exited with {res.returncode}", ""
+            return res.stderr.strip() or f"{cmd[0]} exited with {res.returncode}", ""
         return None, res.stdout
 
-    def set_atom(self, env, key, atom, value, label):
+    def send_fps(self, env, fps):
+        """Sets the frame cap (0 = off). Gamescope also switches the built-in screen to the highest refresh
+        rate that's a multiple of it, exactly like Steam's slider. Returns (error or None, method)."""
         if self.dry_run:
-            log.info("[dry-run] xprop %s = %s on %s", atom, value, env)
-            return self.note(key, True, label)
-        err, _ = self.xprop(env, "-f", atom, "32c", "-set", atom, str(value))
-        if err:
-            self.warn_once(f"xprop-{atom}", "setting %s failed: %s", atom, err)
-        self.note(key, not err, err or label)
-
-    def get_atom(self, env, atom):
-        err, out = self.xprop(env, atom)
-        m = re.search(r"=\s*(\d+)", out)
-        return int(m.group(1)) if m else None
+            log.info("[dry-run] gamescopectl debug_set_fps_limit %s", fps)
+            return None, "gamescopectl"
+        err, _ = self.run_as_user(env, "gamescopectl", "debug_set_fps_limit", str(fps))
+        if not err:
+            return None, "gamescopectl"
+        self.warn_once("gamescopectl", "gamescopectl failed (%s), falling back to X properties", err)
+        err2, _ = self.run_as_user(env, "xprop", "-root", "-f", "GAMESCOPE_FPS_LIMIT", "32c",
+                                   "-set", "GAMESCOPE_FPS_LIMIT", str(fps))
+        return (None, "xprop") if not err2 else (f"{err}; {err2}", None)
 
     def apply(self, final):
         self.results = {}
@@ -701,14 +710,24 @@ class Tuner:
             self.note("fps", None, "only works in Game Mode")
             self.note("refresh", None, "only works in Game Mode")
             return
-        self.set_atom(env, "fps", "GAMESCOPE_FPS_LIMIT", final["fps"], final["fps"] or "unlimited")
-        if final["refresh"]:
-            self.set_atom(env, "refresh", "GAMESCOPE_DYNAMIC_REFRESH", final["refresh"], f"{final['refresh']}Hz")
-        else:
+        err, method = self.send_fps(env, final["fps"])
+        self.note("fps", not err, err or final["fps"] or "unlimited")
+        if err:
+            self.note("refresh", False, "not changed, the FPS cap couldn't be set")
+        elif not final["refresh"]:
             self.note("refresh", None, "external screen sets its own")
+        elif method == "gamescopectl":
+            self.note("refresh", True, f"{final['refresh']}Hz (Game Mode matches it to the FPS cap)")
+        else:  # old gamescope: the X property still works there
+            err, _ = self.run_as_user(env, "xprop", "-root", "-f", "GAMESCOPE_DYNAMIC_REFRESH", "32c",
+                                      "-set", "GAMESCOPE_DYNAMIC_REFRESH", str(final["refresh"]))
+            self.note("refresh", not err, err or f"{final['refresh']}Hz")
 
     def verify(self, final):
-        """Reads settings back and lists any that something else (usually Steam) has changed."""
+        """Re-asserts the frame cap and lists settings something else (usually Steam) has changed.
+
+        Gamescope has no way to read the active frame cap back, and Steam resends its own (often "off")
+        when a game starts or its Performance settings are touched, so the cap is simply sent again."""
         problems = []
         hwmon = self.amdgpu_hwmon()
         cap = read(hwmon / "power1_cap") if hwmon else None
@@ -716,15 +735,10 @@ class Tuner:
             problems.append(f"Power limit is {round(int(cap) / 1_000_000)}W instead of {final['tdp']}W "
                             "(Steam's TDP limit is probably on)")
         env = self.gamescope_env()
-        if env:
-            fps = self.get_atom(env, "GAMESCOPE_FPS_LIMIT")
-            if fps is not None and fps != final["fps"]:
-                problems.append(f"FPS cap is {fps or 'off'} instead of {final['fps'] or 'off'} "
-                                "(Steam's framerate limit is probably on)")
-            hz = self.get_atom(env, "GAMESCOPE_DYNAMIC_REFRESH")
-            if final["refresh"] and hz is not None and hz != final["refresh"]:
-                problems.append(f"Refresh rate is {hz}Hz instead of {final['refresh']}Hz "
-                                "(Steam's refresh rate slider was probably changed)")
+        if env and self.results.get("fps", {}).get("ok"):
+            err, _ = self.send_fps(env, final["fps"])
+            if err:
+                problems.append(f"Couldn't re-send the FPS cap: {err}")
         return problems
 
     def restore(self):

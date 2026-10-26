@@ -52,7 +52,7 @@ Deck the moment any of these change:
 
 - **Power limit (TDP)**, 3–15 W, fixed or auto-tuned
 - **GPU clock**: auto, or locked at 200–1600 MHz
-- **FPS limit** and the **built-in screen's refresh rate** (it knows the LCD's 40–60Hz from the OLED's 45–90Hz)
+- **FPS limit**, sent to Game Mode the same way Steam's framerate slider does, which also sets the built-in screen's refresh rate to match (it knows the LCD's 40–60Hz from the OLED's 45–90Hz)
 - **SMT** (hyperthreading), **CPU boost** and **CPU power preference**
 - **Memory settings** and, optionally, the **battery charge limit** while docked
 
