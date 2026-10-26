@@ -8,7 +8,7 @@ Deck the moment any of these change:
 | **The game you're playing** | Every game Steam launches, including non-Steam games and emulators added to Steam. Names come from Steam's app manifests and `shortcuts.vdf` |
 | **Charger or battery** | The AC adapter, plus battery % for a low-battery mode |
 | **The screen you're on** | Built-in panel, **TV** or **monitor**, with the resolution and refresh rate it's *actually* running at (not just what the screen advertises) |
-| **What you're playing with** | The Deck's own controls, a **controller** (Xbox, PlayStation, Switch, 8BitDo...), or **keyboard and mouse**. Whichever you touched last wins. Steam's virtual pads are ignored |
+| **What you're playing with** | The Deck's own controls, a **controller** (Xbox, PlayStation, Switch, 8BitDo...), or **keyboard and mouse**. Keyboard/mouse counts while you're using it; a connected controller counts otherwise. Controllers are never read, so Steam Input keeps them to itself |
 
 ### Every game is optimized, profile or not
 
@@ -72,6 +72,7 @@ the background service, and puts three shortcuts on your desktop:
 | **Update DeckOpt** | Gets the latest version from GitHub (your profiles are kept) |
 | **DeckOpt Check** | Plain-English health check: did each setting actually apply during your last game, or did Steam override it? |
 | **Edit DeckOpt Profiles** | Opens your profiles file |
+| **DeckOpt On-Off** | Turns DeckOpt off (stock settings come back) or on again. Handy to see if something is DeckOpt's doing |
 
 Go back to Game Mode and play. It keeps running across reboots and SteamOS updates.
 

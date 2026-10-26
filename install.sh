@@ -91,11 +91,16 @@ case "\${1:-status}" in
     edit)      exec xdg-open "\$CONFIG" ;;
     log|logs)  exec sudo journalctl -u deckopt -f -o cat ;;
     restart)   exec sudo systemctl restart deckopt ;;
+    toggle)    if systemctl is-active --quiet deckopt; then
+                   sudo systemctl stop deckopt && echo "DeckOpt is OFF: stock settings restored until you turn it on or restart the Deck."
+               else
+                   sudo systemctl start deckopt && echo "DeckOpt is ON."
+               fi ;;
     version)   cat "\$APP/VERSION" 2>/dev/null || echo unknown ;;
     apply)     shift; exec sudo python3 "\$APP/deckopt.py" apply -c "\$CONFIG" "\$@" ;;
     status)    shift || true; exec python3 "\$APP/deckopt.py" status -c "\$CONFIG" "\$@" ;;
     check)     exec python3 "\$APP/deckopt.py" check -c "\$CONFIG" ;;
-    *)         echo "usage: deckopt [check|status|update|edit|log|restart|apply|version|uninstall]" ;;
+    *)         echo "usage: deckopt [check|status|toggle|update|edit|log|restart|apply|version|uninstall]" ;;
 esac
 EOF
 chmod 755 "$home/.local/bin/deckopt"
@@ -114,6 +119,7 @@ shortcut update "Update DeckOpt" system-software-update "konsole --hold -e $home
 rm -f "$home/.local/share/applications/deckopt-status.desktop" "$home/Desktop/deckopt-status.desktop"  # replaced by Check
 shortcut check  "DeckOpt Check" utilities-system-monitor "konsole --hold -e $home/.local/bin/deckopt check"
 shortcut edit   "Edit DeckOpt Profiles" document-edit "xdg-open $config_dir/profiles.toml"
+shortcut toggle "DeckOpt On-Off" system-shutdown "konsole --hold -e $home/.local/bin/deckopt toggle"
 USER
 
     say "Starting service..."
@@ -128,7 +134,7 @@ USER
     sudo -u "$user" python3 "$APP_DIR/deckopt.py" status -c "$config_dir/profiles.toml" 2>/dev/null || true
     cat <<EOF
 
-  Desktop shortcuts:  DeckOpt Check, Update DeckOpt, Edit DeckOpt Profiles
+  Desktop shortcuts:  DeckOpt Check, DeckOpt On-Off, Update DeckOpt, Edit DeckOpt Profiles
   Commands:           deckopt check | status | update | edit | log | uninstall
                       (open a new Konsole window first so the command is found)
 

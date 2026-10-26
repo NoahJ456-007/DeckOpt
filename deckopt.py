@@ -325,9 +325,10 @@ def input_devices():
 class InputWatcher:
     """Works out whether you're playing with the Deck's own controls, a controller, or keyboard and mouse.
 
-    The service (root) reads input events without taking them from anyone, so whichever kind was used
-    most recently wins. Without that (not root, or nothing touched lately) connected devices decide:
-    a controller, then keyboard/mouse, else the Deck itself."""
+    Only keyboards and mice are ever opened (by the root service) to see when they were last used.
+    Controllers, including the Deck's built-in one, are never opened: Steam Input owns them, and reading
+    them alongside Steam broke the left stick in at least one game. They count by being connected:
+    keyboard/mouse if used in the last couple of minutes, else a connected controller, else the Deck."""
 
     RECENT = 120  # seconds an input counts as "in use" after it was last touched
     EVENT = struct.Struct("llHHi")
@@ -338,7 +339,7 @@ class InputWatcher:
 
     def scan(self):
         self.devices = input_devices()
-        wanted = {d["event"]: d for d in self.devices}
+        wanted = {d["event"]: d for d in self.devices if d["kind"] == "kbm"}
         for event in list(self.fds):
             if event not in wanted:
                 os.close(self.fds.pop(event)[0])
