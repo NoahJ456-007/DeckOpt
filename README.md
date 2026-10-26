@@ -5,20 +5,36 @@ Deck the moment any of these change:
 
 | It watches | How it knows |
 |---|---|
-| **The game you're playing** | Steam's `reaper SteamLaunch AppId=…` process; the name comes from the game's appmanifest (internal storage + SD card) |
-| **Charger or battery** | `/sys/class/power_supply` (AC adapter, plus battery % for a low-battery mode) |
-| **The screen you're on** | DRM connectors: built-in panel vs. an external monitor/TV, read from the screen's EDID (name, resolution, refresh rate) |
+| **The game you're playing** | Every game Steam launches, including non-Steam games and emulators added to Steam. Names come from Steam's app manifests and `shortcuts.vdf` |
+| **Charger or battery** | The AC adapter, plus battery % for a low-battery mode |
+| **The screen you're on** | Built-in panel, **TV** or **monitor**, with the resolution and refresh rate it's *actually* running at (not just what the screen advertises) |
 
-and sets:
+### Every game is optimized, profile or not
 
-- **TDP** (3–15 W)
-- **GPU clock** (auto, or locked 200–1600 MHz)
-- **FPS limit**: a number, `"refresh"` (match the screen) or `"half"`
-- **Built-in screen refresh rate**: `"fps"` picks the lowest rate that's a whole multiple of the frame cap (40 fps → 40 Hz, 30 fps → 60 Hz) for smooth pacing on minimal power. It knows the LCD (40–60 Hz) and the OLED (45–90 Hz) apart.
+- **Automatic power tuning on battery.** DeckOpt watches GPU and CPU load. If the game is easily
+  hitting its frame cap, the power limit steps down until it's just keeping up; if the GPU or a CPU
+  core maxes out, it steps back up fast. The result is remembered per game, power source and screen,
+  so the next session starts tuned.
+- **Smooth frame pacing on the built-in screen.** The refresh rate is set to an even multiple of the
+  frame cap: 40 FPS → 40Hz on the LCD, 60 FPS → 60Hz (not a juddery 90Hz) on the OLED.
+- Hand-tuned profiles for some games (Elden Ring, Cyberpunk, Hades, Stardew, Terraria, Cuphead).
+  Updates add more, and your own settings always win.
+
+### Optimized for whatever it's plugged into
+
+- **TVs and monitors are told apart**: "TV" in the name, a big screen (80cm+), or HDMI data with no
+  fixed size (TVs, projectors). Give each kind its own settings with `[profile.tv]` / `[profile.monitor]`.
+- **The frame cap fits the screen's refresh rate evenly**, so every frame is shown for the same time:
+  60Hz TV → 60, 120Hz TV → 60, 144Hz monitor → 48, 165Hz → 55. A game set to 30 stays a steady 30.
+- **It follows the live mode.** If you set a 144Hz monitor to 60Hz in Steam, the cap follows.
+- Any one screen can get its own profile by name.
+
+### What it controls
+
+- **Power limit (TDP)**, 3–15 W, fixed or auto-tuned
+- **GPU clock**: auto, or locked at 200–1600 MHz
+- **FPS limit** and the **built-in screen's refresh rate** (it knows the LCD's 40–60Hz from the OLED's 45–90Hz)
 - **SMT** (hyperthreading) and **CPU boost**
-
-When docked, the frame cap follows the TV/monitor's own refresh rate, and you can give a specific
-screen its own profile by name.
 
 ## Install
 
@@ -55,7 +71,10 @@ catch Steam's own launch-time settings.
 
 ## Your profiles
 
-Edit `~/.config/deckopt/profiles.toml` (or run `deckopt edit`). Changes apply live. Layers stack from general to
+You don't have to set anything up: the built-in profiles cover every game and screen. To change
+something, double-click **Edit DeckOpt Profiles** (`~/.config/deckopt/profiles.toml`). It only needs
+the settings you want to override, and changes apply live. `profiles.example.toml` next to it lists
+every built-in profile and option. Layers stack from general to
 specific, and later ones win:
 
 ```

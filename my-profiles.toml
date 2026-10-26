@@ -1,0 +1,18 @@
+# Your DeckOpt settings. Changes apply instantly, no restart needed.
+#
+# DeckOpt's built-in profiles already cover every game (power is tuned automatically on battery) and
+# every screen (frame caps fit your TV or monitor). Updates improve them. Anything you put here
+# wins over the built-in profiles. profiles.example.toml next to this file lists every option.
+#
+# Find a game's id or a screen's name with the "DeckOpt Check" shortcut.
+#
+# Examples, remove the # to use them:
+#
+# [game.105600]            # Terraria
+# fps = 60
+#
+# [profile.battery]        # every game on battery
+# tdp = 8
+#
+# [display."LG TV SSCR2"]  # one particular TV
+# fps = 30

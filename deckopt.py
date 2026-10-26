@@ -37,8 +37,9 @@ PANELS = {
 }
 TDP_RANGE = (3, 15)
 GPU_MHZ_RANGE = (200, 1600)
-SETTING_KEYS = {"tdp", "gpu_mhz", "fps", "refresh", "smt", "cpu_boost"}
-DEFAULTS = {"tdp": 15, "gpu_mhz": "auto", "fps": 0, "refresh": "max", "smt": True, "cpu_boost": True}
+SETTING_KEYS = {"tdp", "auto_tdp", "gpu_mhz", "fps", "max_fps", "refresh", "smt", "cpu_boost"}
+DEFAULTS = {"tdp": 15, "auto_tdp": False, "gpu_mhz": "auto", "fps": 0, "max_fps": 60, "refresh": "max",
+            "smt": True, "cpu_boost": True}
 
 
 def sysfs(path):
@@ -67,10 +68,12 @@ class Screen:
     width: int = 0
     height: int = 0
     refresh: float = 0.0
+    kind: str = "built-in"  # "built-in", "tv" or "monitor"
 
     def describe(self):
         mode = f" {self.width}x{self.height}@{self.refresh:g}Hz" if self.width else ""
-        return f"{self.name} ({self.connector}{mode})"
+        kind = "" if self.internal else ("TV, " if self.kind == "tv" else "monitor, ")
+        return f"{self.name} ({kind}{self.connector}{mode})"
 
 
 @dataclass(frozen=True)
@@ -92,29 +95,71 @@ class State:
 
 
 def parse_edid(blob):
-    """Return (monitor name, width, height, refresh) of the preferred mode in a base EDID block."""
+    """Name, physical width in cm, CEA (TV-style) extension present, and preferred mode (w, h, Hz)."""
+    info = {"name": None, "width_cm": 0, "cea": False, "mode": (0, 0, 0.0)}
     if len(blob) < 128 or blob[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
-        return None, 0, 0, 0.0
-    name, w, h, hz = None, 0, 0, 0.0
+        return info
+    info["width_cm"] = blob[21]
+    info["cea"] = any(blob[i] == 0x02 for i in range(128, len(blob), 128))
     for off in (54, 72, 90, 108):
         d = blob[off:off + 18]
         clock = int.from_bytes(d[0:2], "little")  # in 10 kHz units
         if clock:
             # Detailed timing descriptor; the first one is the preferred mode.
-            if not w:
+            if not info["mode"][0]:
                 ha = d[2] | (d[4] & 0xF0) << 4
                 hb = d[3] | (d[4] & 0x0F) << 8
                 va = d[5] | (d[7] & 0xF0) << 4
                 vb = d[6] | (d[7] & 0x0F) << 8
-                w, h = ha, va
-                hz = round(clock * 10_000 / ((ha + hb) * (va + vb)), 1)
+                info["mode"] = (ha, va, round(clock * 10_000 / ((ha + hb) * (va + vb)), 2))
         elif d[3] == 0xFC:
-            name = d[5:18].decode("cp437").split("\n")[0].strip()
-    return name, w, h, hz
+            info["name"] = d[5:18].decode("cp437").split("\n")[0].strip()
+    return info
+
+
+def screen_kind(info):
+    """TVs: "TV" in the name, 80cm+ wide (~36"+), or no fixed size with HDMI/CEA data (TVs and projectors)."""
+    if re.search(r"\bTV\b", info["name"] or "", re.I) or info["width_cm"] >= 80:
+        return "tv"
+    if info["width_cm"] == 0 and info["cea"]:
+        return "tv"
+    return "monitor"
+
+
+def active_modes():
+    """Mode each connector is actually driven at, from the DRM debugfs state (root only).
+
+    The screen's preferred mode isn't always what's in use, e.g. a 144Hz monitor running at 60Hz."""
+    modes = {}
+    for state_file in glob.glob(sysfs("/sys/kernel/debug/dri/*/state")):
+        text = read(state_file, "")
+        crtc_modes, conn_crtc, section = {}, {}, None
+        for line in text.splitlines():
+            m = re.match(r"(crtc|connector)\[\d+\]: (\S+)", line)
+            if m:
+                section = m.groups()
+                continue
+            if not section:
+                continue
+            line = line.strip()
+            if section[0] == "crtc":
+                m = re.match(r'mode: "(\d+)x(\d+)[^"]*": \d+ (\d+) \d+ \d+ \d+ (\d+) \d+ \d+ \d+ (\d+)', line)
+                if m:
+                    w, h, clock, htotal, vtotal = map(int, m.groups())
+                    crtc_modes[section[1]] = (w, h, round(clock * 1000 / (htotal * vtotal), 2))
+                elif line == "active=0":
+                    crtc_modes[section[1]] = None
+            elif section[0] == "connector" and line.startswith("crtc="):
+                conn_crtc[section[1]] = line.split("=", 1)[1]
+        for conn, crtc in conn_crtc.items():
+            if crtc_modes.get(crtc):
+                modes[conn] = crtc_modes[crtc]
+    return modes
 
 
 def screens():
     found = []
+    live = active_modes()
     for status in sorted(glob.glob(sysfs("/sys/class/drm/card*-*/status"))):
         if read(status) != "connected":
             continue
@@ -125,8 +170,10 @@ def screens():
             edid = (conn_dir / "edid").read_bytes()
         except OSError:
             edid = b""
-        name, w, h, hz = parse_edid(edid)
-        found.append(Screen(connector, internal, "Built-in" if internal else name or connector, w, h, hz))
+        info = parse_edid(edid)
+        w, h, hz = live.get(connector) or info["mode"]
+        name = "Built-in" if internal else info["name"] or connector
+        found.append(Screen(connector, internal, name, w, h, hz, "built-in" if internal else screen_kind(info)))
     return found
 
 
@@ -202,6 +249,21 @@ class GameNames:
             m = re.search(r'"name"\s+"([^"]*)"', acf)
             if m:
                 return m.group(1)
+        return self._shortcut_name(int(appid))
+
+    def _shortcut_name(self, appid):
+        """Non-Steam games (emulators, EmuDeck entries...) live in the binary userdata/*/config/shortcuts.vdf."""
+        for vdf in glob.glob(str(self.steam / "userdata" / "*" / "config" / "shortcuts.vdf")):
+            try:
+                data = Path(vdf).read_bytes()
+            except OSError:
+                continue
+            for m in re.finditer(rb"\x02appid\x00(.{4})", data, re.S | re.I):
+                if int.from_bytes(m.group(1), "little") != appid:
+                    continue
+                name = re.compile(rb"\x01appname\x00([^\x00]*)\x00", re.I).search(data, m.end())
+                if name:
+                    return name.group(1).decode(errors="replace")
         return None
 
 
@@ -232,9 +294,12 @@ def merge_layer(table, state, label, out, trail):
     """Merge one profile table and its condition sub-tables, most general first."""
     if not table:
         return
-    combo = f"{state.power}+{state.where}"
-    for suffix, sub in (("", table), (state.power, table.get(state.power)),
-                        (state.where, table.get(state.where)), (combo, table.get(combo))):
+    kind = None if state.screen.internal else state.screen.kind
+    suffixes = ["", state.power, state.where, kind, f"{state.power}+{state.where}", kind and f"{state.power}+{kind}"]
+    for suffix in suffixes:
+        if suffix is None:
+            continue
+        sub = table.get(suffix) if suffix else table
         if isinstance(sub, dict):
             values = {k: v for k, v in sub.items() if k in SETTING_KEYS}
             if values:
@@ -272,10 +337,23 @@ def best_refresh(fps, lo, hi, highest=False):
     return hi
 
 
+def even_fps(hz, limit, min_ratio):
+    """Highest frame cap at or under `limit` that the refresh rate divides evenly, so every frame is shown
+    for the same number of refreshes (144Hz -> 72 or 48, 120Hz -> 60, 60Hz -> 60 or 30).
+    Falls back to `limit` if the best even cap would be below limit * min_ratio (e.g. 75Hz -> 25)."""
+    for n in range(1, 13):
+        fps = hz / n
+        if fps <= limit + 0.5 and abs(fps - round(fps)) < 0.1:
+            return round(fps) if fps >= limit * min_ratio else limit
+    return limit
+
+
 def finalize(settings, state, panel):
     """Turn symbolic values ("refresh", "max", "auto", ...) into concrete numbers for this screen."""
     lo, hi = panel["refresh"]
     fps, refresh = settings["fps"], settings["refresh"]
+    if state.screen.internal and fps == "auto":
+        fps = min(int(settings["max_fps"]), hi)
     if state.screen.internal:
         if isinstance(refresh, int):
             hz = clamp(refresh, lo, hi)
@@ -284,7 +362,13 @@ def finalize(settings, state, panel):
         else:  # "max" or "fps": a rate the frame cap divides evenly, so e.g. 60fps gets 60Hz, not a juddery 90Hz
             hz = best_refresh(int(fps), lo, hi, highest=refresh == "max")
     else:
-        hz = round(state.screen.refresh) or 60
+        # External screens keep their own refresh rate, so fit the frame cap to it instead.
+        hz = state.screen.refresh or 60
+        if fps == "auto":
+            fps = even_fps(hz, int(settings["max_fps"]), 0.75)
+        elif fps not in ("refresh", "half") and int(fps) > 0:
+            fps = even_fps(hz, int(fps), 0.85)
+        hz = round(hz)
     if fps == "refresh":
         fps = hz
     elif fps == "half":
@@ -292,6 +376,7 @@ def finalize(settings, state, panel):
     gpu = settings["gpu_mhz"]
     return {
         "tdp": clamp(settings["tdp"], *TDP_RANGE),
+        "auto_tdp": bool(settings["auto_tdp"]),
         "gpu_mhz": "auto" if gpu == "auto" else clamp(gpu, *GPU_MHZ_RANGE),
         "fps": max(0, int(fps)),
         "refresh": hz if state.screen.internal else None,  # gamescope drives external refresh itself
@@ -471,6 +556,75 @@ class Tuner:
         self.apply({**DEFAULTS, "fps": 0, "refresh": None})
 
 
+def cpu_times():
+    times = {}
+    for line in read(sysfs("/proc/stat"), "").splitlines():
+        if re.match(r"cpu\d+ ", line):
+            f = [int(x) for x in line.split()[1:]]
+            times[line.split()[0]] = (sum(f), f[3] + (f[4] if len(f) > 4 else 0))  # total, idle + iowait
+    return times
+
+
+class AutoTDP:
+    """Battery saver that works for every game, with or without a profile.
+
+    Watches how busy the GPU and the busiest CPU core are. Plenty of idle time means the game is
+    easily hitting its frame cap, so the power limit steps down; the GPU or a core maxing out means it's
+    struggling, so it steps back up. It never goes above the profile's tdp, and what it settles on is
+    remembered per game, power source and screen, so the next session starts there."""
+
+    WARMUP, STEP_EVERY = 20, 10  # seconds
+
+    def __init__(self, tuner, settings, path):
+        self.tuner, self.path = tuner, path
+        self.floor = int(settings.get("auto_tdp_min", 5))
+        try:
+            self.learned = json.loads(path.read_text())
+        except (OSError, ValueError):
+            self.learned = {}
+        self.begin(None, None)
+
+    def begin(self, key, ceiling):
+        self.key, self.ceiling = key, ceiling
+        if key:
+            self.current = clamp(self.learned.get(key, ceiling), min(self.floor, ceiling), ceiling)
+        self.samples, self.prev_cpu = [], None
+        self.started = self.last_step = time.monotonic()
+
+    def sample(self):
+        """Call every poll. Returns a new power limit when it's time to change it, else None."""
+        if not self.key:
+            return None
+        hwmon = self.tuner.amdgpu_hwmon()
+        busy = read(self.tuner.gpu_device(hwmon) / "gpu_busy_percent", "") if hwmon else ""
+        cpu = cpu_times()
+        if busy.isdigit() and self.prev_cpu:
+            cores = [100 * (1 - (cpu[c][1] - self.prev_cpu[c][1]) / max(1, cpu[c][0] - self.prev_cpu[c][0]))
+                     for c in cpu if c in self.prev_cpu]
+            self.samples.append((int(busy), max(cores, default=0)))
+        self.prev_cpu = cpu
+        now = time.monotonic()
+        if now - self.started < self.WARMUP or now - self.last_step < self.STEP_EVERY or not self.samples:
+            return None
+        gpu = sum(g for g, _ in self.samples) / len(self.samples)
+        core = sum(c for _, c in self.samples) / len(self.samples)
+        self.samples, self.last_step = [], now
+        new = self.current
+        if gpu > 92 or core > 92:
+            new = min(self.ceiling, self.current + 2)  # struggling: recover quickly
+        elif gpu < 70 and core < 80:
+            new = max(self.floor, self.current - 1)    # headroom: ease down
+        log.debug("auto tdp: gpu %d%%, busiest core %d%%, %dW -> %dW", gpu, core, self.current, new)
+        if new == self.current:
+            return None
+        self.current = self.learned[self.key] = new
+        try:
+            self.path.write_text(json.dumps(self.learned, indent=1))
+        except OSError as e:
+            log.debug("could not save learned limits: %s", e)
+        return new
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -535,6 +689,14 @@ def cmd_status(args, apply=False):
 STATE_FILE = Path(os.environ.get("DECKOPT_STATE") or Path(__file__).with_name("state.json"))
 
 
+LEARNED_FILE = STATE_FILE.with_name("learned.json")
+
+
+def note_auto(tuner, final):
+    if "tdp_max" in final and tuner.results.get("tdp", {}).get("ok"):
+        tuner.results["tdp"]["detail"] = f"{final['tdp']}W (auto-tuned, up to {final['tdp_max']}W)"
+
+
 def save_state(data):
     """What the service did, for `deckopt check` to read without root."""
     try:
@@ -562,6 +724,7 @@ def cmd_run(args):
     mtime = path.stat().st_mtime
     names = GameNames(cfg.get("settings", {}).get("user", "deck"))
     tuner = Tuner(cfg, args.dry_run)
+    auto = AutoTDP(tuner, cfg.get("settings", {}), LEARNED_FILE)
     panel = panel_info()
     log.info("DeckOpt started (%s panel, config %s)", panel["model"], path)
     status = {"version": read(Path(__file__).with_name("VERSION"), "dev"), "started": time.time(),
@@ -593,6 +756,13 @@ def cmd_run(args):
                 values, trail = resolve(cfg, state)
                 final = finalize(values, state, panel)
                 changed = key != last
+                if final["auto_tdp"] and state.appid:
+                    final["tdp_max"] = final["tdp"]
+                    if changed or auto.key is None:
+                        auto.begin(f"{state.appid}|{state.power}|{state.where}", final["tdp"])
+                    final["tdp"] = auto.current
+                else:
+                    auto.begin(None, None)
                 if changed:
                     log.info(summarize(state, final, trail))
                     knobs = f"{final['tdp']}W, {final['fps'] or 'unlimited'} FPS"
@@ -600,12 +770,20 @@ def cmd_run(args):
                         f"{time.strftime('%H:%M')}  {game_label(state) or 'no game'} | {power_label(state)} | "
                         f"{state.screen.name} -> {knobs}"])[-8:]
                 tuner.apply(final)
+                note_auto(tuner, final)
                 for key_name, r in tuner.results.items():
                     if r["ok"] is False:
                         log.warning("%s not applied: %s", key_name, r["detail"])
                 settled, applied_at, last = not changed, now, key
                 verified_at = 0.0 if resettle else now  # check right after the settle pass
                 record(status, state, final, tuner, [])
+            new_tdp = auto.sample()
+            if new_tdp is not None:
+                log.info("auto power limit for %s: %dW -> %dW", game_label(state), final["tdp"], new_tdp)
+                final["tdp"] = new_tdp
+                tuner.set_tdp(new_tdp)
+                note_auto(tuner, final)
+                record(status, state, final, tuner, status["current"]["problems"])
             # Watch for Steam (or anything else) changing our settings afterwards.
             if settled and now - verified_at >= settings.get("verify_seconds", 15):
                 verified_at = now

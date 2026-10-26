@@ -65,12 +65,20 @@ install_as_root() {
     [[ -s $SRC/VERSION ]] && install -m 644 "$SRC/VERSION" "$APP_DIR/VERSION"
     sed "s|@CONFIG@|$config_dir/profiles.toml|; s|@APP_DIR@|$APP_DIR|" "$SRC/deckopt.service" > "$UNIT"
 
-    # Profiles belong to the user. Never overwrite theirs; keep the latest examples beside it.
+    # Profiles belong to the user. Never overwrite their edits; keep the latest examples beside them.
     sudo -u "$user" bash -s "$SRC" "$config_dir" "$home" <<'USER'
 set -e
 src=$1 config_dir=$2 home=$3
 mkdir -p "$config_dir" "$home/.local/bin" "$home/.local/share/applications"
-[[ -f $config_dir/profiles.toml ]] || cp "$src/profiles.toml" "$config_dir/profiles.toml"
+# Older versions copied the full defaults here, which would shadow every improvement in the built-in
+# profiles. If that copy was never edited (it matches a shipped version), swap in the short overrides file.
+SHIPPED_DEFAULTS="43941b2b5f2b96aa4c88e448e2cca9e891ce6be33dbabf7d034c7beeaac19165
+cedd06095073167342ee6c8e93aa91da54597b87168a1dedd0df3d4726621e32"
+if [[ -f $config_dir/profiles.toml ]] &&
+   grep -qx "$(sha256sum "$config_dir/profiles.toml" | cut -d' ' -f1)" <<<"$SHIPPED_DEFAULTS"; then
+    rm "$config_dir/profiles.toml"
+fi
+[[ -f $config_dir/profiles.toml ]] || cp "$src/my-profiles.toml" "$config_dir/profiles.toml"
 cp "$src/profiles.toml" "$config_dir/profiles.example.toml"
 
 cat > "$home/.local/bin/deckopt" <<EOF
