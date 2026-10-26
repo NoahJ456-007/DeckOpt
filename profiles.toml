@@ -1,0 +1,101 @@
+# DeckOpt profiles
+#
+# Settings you can use in any profile table:
+#   tdp       = 3..15            watts for the whole APU
+#   gpu_mhz   = "auto" | 200..1600   lock the GPU clock (auto = let the driver decide)
+#   fps       = 0 | number | "refresh" | "half"   frame cap (0 = unlimited, "refresh" = match the screen)
+#   refresh   = "max" | "fps" | number   built-in screen refresh rate
+#                ("fps" picks the lowest rate that's a multiple of the fps cap, e.g. 40fps -> 40Hz, 30fps -> 60Hz)
+#   smt       = true | false     CPU hyperthreading
+#   cpu_boost = true | false     CPU turbo boost
+#
+# Any profile table can have sub-tables for conditions:
+#   .battery / .ac               power source
+#   .internal / .external        built-in screen vs. monitor/TV
+#   ."battery+internal" etc.     both at once
+#   .low_battery                 on battery and below low_battery_percent
+#
+# Layers apply in this order, later ones win:
+#   profile -> display."<screen>" -> game."<id or name>" -> profile.low_battery -> game.<..>.low_battery
+#
+# Run `deckopt status` while a game is running to see its AppId, your screen's name,
+# and exactly which layers were used. Edits are picked up live, no restart needed.
+
+[settings]
+poll_seconds = 3
+settle_seconds = 8
+low_battery_percent = 20
+user = "deck"
+gamescope_display = ":0"
+
+# ---------------------------------------------------------------- every game
+
+[profile]
+tdp = 15
+gpu_mhz = "auto"
+fps = "refresh"
+refresh = "max"
+smt = true
+cpu_boost = true
+
+[profile.battery]
+tdp = 10
+fps = 40
+refresh = "fps"          # 40fps @ 40Hz feels much smoother than 40fps @ 60Hz
+
+[profile."battery+external"]   # e.g. a portable monitor running off the Deck
+tdp = 11
+fps = 30
+
+[profile.external]
+fps = "refresh"          # match the monitor/TV's native refresh
+
+[profile.low_battery]
+tdp = 7
+fps = 30
+cpu_boost = false
+
+# ---------------------------------------------------------------- specific screens
+# Name comes from the screen's EDID; `deckopt status` shows it.
+
+# [display."LG TV SSCR2"]
+# fps = 60
+#
+# [display."DELL S2721DGF"]   # 165Hz monitor: the Deck can't hold that, cap at 60
+# fps = 60
+
+# ---------------------------------------------------------------- per-game
+# Key by Steam AppId (most reliable) or by the game's name.
+
+[game.1145360]           # Hades: light, can hold 60 on very little power
+tdp = 9
+[game.1145360.battery]
+tdp = 6
+fps = 60
+refresh = "max"
+
+[game.413150]            # Stardew Valley: barely uses anything
+tdp = 5
+smt = false
+[game.413150.battery]
+tdp = 4
+fps = 60
+refresh = "max"
+
+[game.1245620]           # Elden Ring: heavy, prioritise stable frame pacing
+fps = 40
+refresh = "fps"
+[game.1245620.battery]
+tdp = 13
+fps = 30
+[game.1245620.external]
+fps = 30
+
+[game.1091500]           # Cyberpunk 2077: needs full power everywhere
+fps = 40
+refresh = "fps"
+[game.1091500.battery]
+tdp = 15
+fps = 30
+[game.1091500.external]
+fps = 30

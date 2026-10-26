@@ -1,0 +1,12 @@
+[Unit]
+Description=DeckOpt per-game Steam Deck tuning
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @APP_DIR@/deckopt.py run --config @CONFIG@
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
