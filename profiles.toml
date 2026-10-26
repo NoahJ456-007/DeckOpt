@@ -43,6 +43,8 @@ low_battery_percent = 20
 user = "deck"
 gamescope_display = ":0"
 memory_tweaks = true     # CryoUtilities' recommended memory settings; originals restored if DeckOpt stops
+keep_controllers_awake = true  # turn off USB power saving for wireless controller dongles, a common
+                               # cause of controllers disconnecting and reconnecting over and over
 docked_charge_limit = 0  # e.g. 80: stop charging at 80% while docked (TV/monitor + charger) to spare the
                          # battery; your normal limit comes back when you undock. 0 = off
 

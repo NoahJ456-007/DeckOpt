@@ -45,6 +45,8 @@ Deck the moment any of these change:
   lock fairness), which can smooth out stutter in some games. Your original values come back if
   DeckOpt stops. Turn off with `memory_tweaks = false`.
 - **Re-applies everything after sleep**, since some settings reset when the Deck wakes up.
+- **Keeps wireless controller dongles awake**: turns off USB power saving for them, a common cause of
+  controllers dropping and reconnecting. Restored when DeckOpt stops.
 - **Optional docked charge limit**: set `docked_charge_limit = 80` and the battery stops at 80% while
   you're docked, which is easier on it long term. Your normal limit comes back when you undock. Off by default.
 

@@ -319,8 +319,23 @@ def input_devices():
         else:
             kind = None              # headset buttons, media remotes...
         if kind:
-            devices.append({"name": name, "event": event.group(0), "kind": kind})
-    return devices
+            devices.append({"name": name, "event": event.group(0), "kind": kind, "usb_id": (vendor, product)})
+    # Controller dongles often add keyboard/mouse interfaces (for macros). Those belong to the controller,
+    # so they must never count as, or be opened as, a keyboard or mouse.
+    controller_ids = {d["usb_id"] for d in devices if d["kind"] == "controller"}
+    return [d for d in devices if not (d["kind"] == "kbm" and d["usb_id"] in controller_ids)]
+
+
+def usb_device_dir(event):
+    """The USB device directory behind /dev/input/eventN (the one with idVendor and power/control)."""
+    try:
+        path = Path(sysfs(f"/sys/class/input/{event}")).resolve()
+    except OSError:
+        return None
+    for parent in [path, *path.parents]:
+        if (parent / "idVendor").exists() and (parent / "power" / "control").exists():
+            return parent
+    return None
 
 
 class InputWatcher:
@@ -522,6 +537,7 @@ class Tuner:
         self.results = {}
         self.originals = {}  # path -> value before DeckOpt first changed it, put back on stop
         self.charge_limit_on = False
+        self.awake = set()  # controllers whose USB power saving is already handled
 
     def warn_once(self, key, msg, *args):
         if key not in self.warned:
@@ -620,6 +636,19 @@ class Tuner:
         self.memory_result = {"ok": not errors, "detail": errors[0] if errors else "CryoUtilities settings"}
         if errors:
             log.warning("memory tweaks: %s", errors[0])
+
+    def keep_controllers_awake(self, devices):
+        """Stops USB power saving on wireless controller dongles: a classic cause of a controller
+        dropping and reconnecting over and over. The original setting is put back when DeckOpt stops."""
+        for dev in devices:
+            if dev["kind"] != "controller" or dev["event"] in self.awake:
+                continue
+            self.awake.add(dev["event"])
+            usb = usb_device_dir(dev["event"])
+            control = str(usb / "power" / "control") if usb else None
+            if control and read(control) != "on":
+                if not self.write_restorable(control, "on"):
+                    log.info("keeping %s awake (USB power saving off)", dev["name"])
 
     def set_charge_limit(self, docked, limit):
         """Optional: cap charging while docked to spare the battery; put the user's own limit back after."""
@@ -965,6 +994,8 @@ def cmd_run(args):
             sleep_gap = gap
 
             state = detect(cfg, names, low, inputs)
+            if settings.get("keep_controllers_awake", True):
+                tuner.keep_controllers_awake(inputs.devices)
             low = state.low_battery
             key = (state.appid, state.ac, state.low_battery, state.screen, state.input)
             now = time.monotonic()
