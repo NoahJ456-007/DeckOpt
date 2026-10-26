@@ -8,6 +8,7 @@ Deck the moment any of these change:
 | **The game you're playing** | Every game Steam launches, including non-Steam games and emulators added to Steam. Names come from Steam's app manifests and `shortcuts.vdf` |
 | **Charger or battery** | The AC adapter, plus battery % for a low-battery mode |
 | **The screen you're on** | Built-in panel, **TV** or **monitor**, with the resolution and refresh rate it's *actually* running at (not just what the screen advertises) |
+| **What you're playing with** | The Deck's own controls, a **controller** (Xbox, PlayStation, Switch, 8BitDo...), or **keyboard and mouse**. Whichever you touched last wins. Steam's virtual pads are ignored |
 
 ### Every game is optimized, profile or not
 
@@ -29,12 +30,31 @@ Deck the moment any of these change:
 - **It follows the live mode.** If you set a 144Hz monitor to 60Hz in Steam, the cap follows.
 - Any one screen can get its own profile by name.
 
+### Optimized for how you're playing
+
+- **Keyboard and mouse on the charger** run up to the screen's refresh rate (144 FPS on a 144Hz
+  monitor) for the most responsive aim. Controllers keep the evenly paced cap.
+- Give each input its own settings with `[profile.controller]`, `[profile.kbm]`, `[profile.deck]`,
+  or combine with power like `[profile."ac+kbm"]`.
+
+### Extras (ideas from CryoUtilities, SimpleDeckyTDP and PowerTools)
+
+- **CPU power preference** (SteamOS 3.7.5+): saves power on battery, favours speed on the charger,
+  and goes to maximum saving when the battery is low.
+- **Memory tweaks**: CryoUtilities' recommended settings (swappiness, huge pages, compaction, page
+  lock fairness), which can smooth out stutter in some games. Your original values come back if
+  DeckOpt stops. Turn off with `memory_tweaks = false`.
+- **Re-applies everything after sleep**, since some settings reset when the Deck wakes up.
+- **Optional docked charge limit**: set `docked_charge_limit = 80` and the battery stops at 80% while
+  you're docked, which is easier on it long term. Your normal limit comes back when you undock. Off by default.
+
 ### What it controls
 
 - **Power limit (TDP)**, 3–15 W, fixed or auto-tuned
 - **GPU clock**: auto, or locked at 200–1600 MHz
 - **FPS limit** and the **built-in screen's refresh rate** (it knows the LCD's 40–60Hz from the OLED's 45–90Hz)
-- **SMT** (hyperthreading) and **CPU boost**
+- **SMT** (hyperthreading), **CPU boost** and **CPU power preference**
+- **Memory settings** and, optionally, the **battery charge limit** while docked
 
 ## Install
 

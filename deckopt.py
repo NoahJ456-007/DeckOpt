@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -37,9 +38,20 @@ PANELS = {
 }
 TDP_RANGE = (3, 15)
 GPU_MHZ_RANGE = (200, 1600)
-SETTING_KEYS = {"tdp", "auto_tdp", "gpu_mhz", "fps", "max_fps", "refresh", "smt", "cpu_boost"}
+SETTING_KEYS = {"tdp", "auto_tdp", "gpu_mhz", "fps", "max_fps", "refresh", "smt", "cpu_boost", "cpu_epp"}
 DEFAULTS = {"tdp": 15, "auto_tdp": False, "gpu_mhz": "auto", "fps": 0, "max_fps": 60, "refresh": "max",
-            "smt": True, "cpu_boost": True}
+            "smt": True, "cpu_boost": True, "cpu_epp": None}
+
+# CryoUtilities' recommended memory settings (github.com/CryoByte33/steam-deck-utilities, internal/config.go).
+# The swap file resize it also recommends is left out: that's a one-off disk change, not a runtime setting.
+MEMORY_TWEAKS = {
+    "/proc/sys/vm/swappiness": "1",
+    "/proc/sys/vm/page_lock_unfairness": "1",
+    "/proc/sys/vm/compaction_proactiveness": "0",
+    "/sys/kernel/mm/transparent_hugepage/enabled": "always",
+    "/sys/kernel/mm/transparent_hugepage/shmem_enabled": "advise",
+    "/sys/kernel/mm/transparent_hugepage/khugepaged/defrag": "0",
+}
 
 
 def sysfs(path):
@@ -84,6 +96,8 @@ class State:
     battery: int | None
     low_battery: bool
     screen: Screen
+    input: str = "deck"          # "deck" (built-in controls), "controller" or "kbm"
+    input_name: str = ""
 
     @property
     def power(self):
@@ -267,14 +281,121 @@ class GameNames:
         return None
 
 
-def detect(cfg, names, was_low):
+KEY_A, KEY_Z, KEY_SPACE = 30, 44, 57
+CONTROLLER_NAMES = re.compile(r"controller|gamepad|joystick|joy-con|x-?box|dualsense|dualshock|8bitdo|stadia", re.I)
+
+
+def has_bit(words, n):
+    """Bit n of a /proc/bus/input/devices bitmap (hex longs, most significant first)."""
+    i = len(words) - 1 - n // 64
+    return i >= 0 and (int(words[i], 16) >> (n % 64)) & 1 == 1
+
+
+def input_devices():
+    """Connected input devices as dicts: name, event node, kind ("deck", "controller", "kbm")."""
+    devices = []
+    for block in read(sysfs("/proc/bus/input/devices"), "").split("\n\n"):
+        ids = re.search(r"Bus=(\w+) Vendor=(\w+) Product=(\w+)", block)
+        name = re.search(r'N: Name="(.*)"', block)
+        handlers = re.search(r"H: Handlers=(.*)", block)
+        event = re.search(r"\bevent\d+", handlers.group(1)) if handlers else None
+        if not (ids and name and event):
+            continue
+        bus, vendor, product = (x.lower() for x in ids.groups())
+        name, handlers = name.group(1), handlers.group(1)
+        keys = re.search(r"B: KEY=(.*)", block)
+        keys = keys.group(1).split() if keys else []
+        if "virtual" in name.lower() or (vendor, product) == ("28de", "11ff"):
+            kind = None              # Steam Input's own virtual pads
+        elif (vendor, product) == ("28de", "1205"):
+            kind = "deck"            # the Deck's built-in controls
+        elif bus not in ("0003", "0005"):
+            kind = None              # only USB and Bluetooth; skips power button, touchscreen, etc.
+        elif CONTROLLER_NAMES.search(name) or re.search(r"\bjs\d", handlers):
+            kind = "controller"
+        elif "mouse" in handlers or all(has_bit(keys, k) for k in (KEY_A, KEY_Z, KEY_SPACE)):
+            kind = "kbm"
+        else:
+            kind = None              # headset buttons, media remotes...
+        if kind:
+            devices.append({"name": name, "event": event.group(0), "kind": kind})
+    return devices
+
+
+class InputWatcher:
+    """Works out whether you're playing with the Deck's own controls, a controller, or keyboard and mouse.
+
+    The service (root) reads input events without taking them from anyone, so whichever kind was used
+    most recently wins. Without that (not root, or nothing touched lately) connected devices decide:
+    a controller, then keyboard/mouse, else the Deck itself."""
+
+    RECENT = 120  # seconds an input counts as "in use" after it was last touched
+    EVENT = struct.Struct("llHHi")
+    EV_KEY, EV_REL, EV_ABS, ABS_HAT0X, ABS_HAT0Y = 1, 2, 3, 16, 17
+
+    def __init__(self):
+        self.devices, self.fds, self.last_used, self.scanned = [], {}, {}, 0.0
+
+    def scan(self):
+        self.devices = input_devices()
+        wanted = {d["event"]: d for d in self.devices}
+        for event in list(self.fds):
+            if event not in wanted:
+                os.close(self.fds.pop(event)[0])
+        for event, dev in wanted.items():
+            if event not in self.fds:
+                try:
+                    self.fds[event] = (os.open(sysfs(f"/dev/input/{event}"), os.O_RDONLY | os.O_NONBLOCK), dev)
+                except OSError:
+                    pass  # not root: fall back to which devices are connected
+
+    def poll(self):
+        now = time.monotonic()
+        if now - self.scanned > 10:
+            self.scan()
+            self.scanned = now
+        for event, (fd, dev) in list(self.fds.items()):
+            try:
+                while data := os.read(fd, self.EVENT.size * 64):
+                    for i in range(0, len(data) - self.EVENT.size + 1, self.EVENT.size):
+                        _, _, etype, code, value = self.EVENT.unpack_from(data, i)
+                        # Button/key presses, mouse movement, d-pad. Stick and trigger noise doesn't count.
+                        if (etype == self.EV_KEY and value == 1) or etype == self.EV_REL or \
+                                (etype == self.EV_ABS and code in (self.ABS_HAT0X, self.ABS_HAT0Y) and value):
+                            self.last_used[dev["kind"]] = (now, dev["name"])
+                            break
+            except BlockingIOError:
+                pass
+            except OSError:  # unplugged
+                os.close(fd)
+                del self.fds[event]
+
+    def current(self):
+        """(kind, device name)."""
+        self.poll()
+        now = time.monotonic()
+        recent = {k: v for k, v in self.last_used.items() if now - v[0] < self.RECENT}
+        if recent:
+            kind = max(recent, key=lambda k: recent[k][0])
+            return kind, recent[kind][1]
+        for kind in ("controller", "kbm"):
+            dev = next((d for d in self.devices if d["kind"] == kind), None)
+            if dev:
+                return kind, dev["name"]
+        return "deck", "Steam Deck controls"
+
+
+def detect(cfg, names, was_low, inputs=None):
     settings = cfg.get("settings", {})
     ac, battery = power_state()
     threshold = settings.get("low_battery_percent", 20)
     # Hysteresis so we don't flap around the threshold.
     low = not ac and battery is not None and battery < (threshold + 5 if was_low else threshold)
     appid = running_appid()
-    return State(appid, names.get(appid), ac, battery, low, active_screen(screens()))
+    if inputs is None:
+        inputs = InputWatcher()
+    kind, device = inputs.current()
+    return State(appid, names.get(appid), ac, battery, low, active_screen(screens()), kind, device)
 
 
 # --- Profile resolution -----------------------------------------------------
@@ -295,7 +416,8 @@ def merge_layer(table, state, label, out, trail):
     if not table:
         return
     kind = None if state.screen.internal else state.screen.kind
-    suffixes = ["", state.power, state.where, kind, f"{state.power}+{state.where}", kind and f"{state.power}+{kind}"]
+    suffixes = ["", state.power, state.where, kind, state.input, f"{state.power}+{state.where}",
+                kind and f"{state.power}+{kind}", f"{state.power}+{state.input}"]
     for suffix in suffixes:
         if suffix is None:
             continue
@@ -382,6 +504,7 @@ def finalize(settings, state, panel):
         "refresh": hz if state.screen.internal else None,  # gamescope drives external refresh itself
         "smt": bool(settings["smt"]),
         "cpu_boost": bool(settings["cpu_boost"]),
+        "cpu_epp": settings["cpu_epp"],
     }
 
 
@@ -398,6 +521,8 @@ class Tuner:
         self.dry_run = dry_run
         self.warned = set()
         self.results = {}
+        self.originals = {}  # path -> value before DeckOpt first changed it, put back on stop
+        self.charge_limit_on = False
 
     def warn_once(self, key, msg, *args):
         if key not in self.warned:
@@ -419,6 +544,21 @@ class Tuner:
         except OSError as e:
             self.warn_once(path, "could not write %s: %s", path, e)
             return f"{Path(path).name}: {e.strerror or e}"
+
+    def write_restorable(self, path, value):
+        if path not in self.originals:
+            current = read(path)
+            if current is None:
+                return f"{Path(path).name}: not found"
+            m = re.search(r"\[(\w+)\]", current)  # "always [madvise] never" style files
+            self.originals[path] = m.group(1) if m else current
+        return self.write(path, value)
+
+    def hwmon(self, *names):
+        for name_file in glob.glob(sysfs("/sys/class/hwmon/hwmon*/name")):
+            if read(name_file) in names:
+                return Path(name_file).parent
+        return None
 
     def amdgpu_hwmon(self):
         for name in glob.glob(sysfs("/sys/class/hwmon/hwmon*/name")):
@@ -462,6 +602,40 @@ class Tuner:
                 self.note(key, not err, err or label)
             else:
                 self.note(key, None, "not supported on this system")
+
+    def set_epp(self, pref):
+        """CPU energy/performance bias (amd-pstate-epp, SteamOS 3.7.5+): "power" ... "performance"."""
+        files = sorted(glob.glob(sysfs("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference")))
+        if not pref:
+            return self.note("cpu_epp", None, "left as is")
+        if not files:
+            return self.note("cpu_epp", None, "not supported by this SteamOS version")
+        available = read(Path(files[0]).with_name("energy_performance_available_preferences"), "").split()
+        if available and pref not in available:
+            return self.note("cpu_epp", False, f"\"{pref}\" is not one of: {', '.join(available)}")
+        errors = [e for e in (self.write_restorable(f, pref) for f in files) if e]
+        self.note("cpu_epp", not errors, errors[0] if errors else pref.replace("_", " "))
+
+    def apply_memory_tweaks(self):
+        errors = [e for e in (self.write_restorable(sysfs(p), v) for p, v in MEMORY_TWEAKS.items()) if e]
+        self.memory_result = {"ok": not errors, "detail": errors[0] if errors else "CryoUtilities settings"}
+        if errors:
+            log.warning("memory tweaks: %s", errors[0])
+
+    def set_charge_limit(self, docked, limit):
+        """Optional: cap charging while docked to spare the battery; put the user's own limit back after."""
+        hwmon = self.hwmon("steamdeck_hwmon", "jupiter")
+        path = str(hwmon / "max_battery_charge_level") if hwmon else None
+        if not limit or not path or not os.path.exists(path):
+            return
+        if docked and not self.charge_limit_on:
+            self.write_restorable(path, int(limit))
+            self.charge_limit_on = True
+            log.info("docked: charging capped at %s%%", limit)
+        elif not docked and self.charge_limit_on:
+            self.write(path, self.originals.pop(path))
+            self.charge_limit_on = False
+            log.info("undocked: charge limit back to normal")
 
     # Gamescope (Game Mode) properties, set on Steam's X display.
 
@@ -519,6 +693,7 @@ class Tuner:
         self.set_tdp(final["tdp"])
         self.set_gpu(final["gpu_mhz"])
         self.set_cpu(final["smt"], final["cpu_boost"])
+        self.set_epp(final.get("cpu_epp"))
         # FPS cap and refresh live in gamescope, so they only apply in Game Mode.
         env = self.gamescope_env()
         if env is None:
@@ -554,6 +729,8 @@ class Tuner:
     def restore(self):
         log.info("restoring stock settings")
         self.apply({**DEFAULTS, "fps": 0, "refresh": None})
+        for path, value in self.originals.items():  # memory tweaks, CPU energy preference, charge limit
+            self.write(path, value)
 
 
 def cpu_times():
@@ -650,6 +827,9 @@ def load_config(path):
     return cfg, path
 
 
+INPUT_LABELS = {"deck": "Deck controls", "controller": "controller", "kbm": "keyboard+mouse"}
+
+
 def power_label(state):
     if state.ac:
         return "charger"
@@ -668,7 +848,10 @@ def summarize(state, final, trail):
     if final["refresh"]:
         knobs += f", {final['refresh']}Hz"
     knobs += f", smt {'on' if final['smt'] else 'off'}, boost {'on' if final['cpu_boost'] else 'off'}"
-    return (f"game: {game} | power: {power} | screen: {state.screen.describe()}\n"
+    if final.get("cpu_epp"):
+        knobs += f", cpu {final['cpu_epp'].replace('_', ' ')}"
+    return (f"game: {game} | power: {power} | screen: {state.screen.describe()} | "
+            f"input: {INPUT_LABELS[state.input]} ({state.input_name})\n"
             f"  -> {knobs}\n  layers: {' > '.join(trail)}")
 
 
@@ -711,7 +894,7 @@ def save_state(data):
 def record(status, state, final, tuner, problems):
     status["current"] = {
         "time": time.time(), "game": game_label(state), "power": power_label(state),
-        "screen": state.screen.describe(), "target": final, "results": dict(tuner.results),
+        "screen": state.screen.describe(), "input": f"{INPUT_LABELS[state.input]} ({state.input_name})", "target": final, "results": dict(tuner.results),
         "problems": problems, "game_mode": tuner.results.get("fps", {}).get("ok") is not None,
     }
     if state.appid:
@@ -725,15 +908,24 @@ def cmd_run(args):
     names = GameNames(cfg.get("settings", {}).get("user", "deck"))
     tuner = Tuner(cfg, args.dry_run)
     auto = AutoTDP(tuner, cfg.get("settings", {}), LEARNED_FILE)
+    inputs = InputWatcher()
     panel = panel_info()
     log.info("DeckOpt started (%s panel, config %s)", panel["model"], path)
     status = {"version": read(Path(__file__).with_name("VERSION"), "dev"), "started": time.time(),
-              "current": None, "last_game": None, "events": []}
+              "current": None, "last_game": None, "events": [], "memory": None}
+    # CLOCK_MONOTONIC stops while asleep and CLOCK_BOOTTIME doesn't, so a jump in the gap means we just woke up.
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)  # Linux only
+    sleep_gap = 0.0
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     last, low, applied_at, settled, verified_at = None, False, 0.0, True, 0.0
     state = final = None
-    try:
+    try:  # everything changed from here on is put back by tuner.restore(), even after a crash
+        if cfg.get("settings", {}).get("memory_tweaks", False):
+            tuner.apply_memory_tweaks()
+            status["memory"] = tuner.memory_result
+        if boottime is not None:
+            sleep_gap = time.clock_gettime(boottime) - time.monotonic()
         while True:
             settings = cfg.get("settings", {})
             if path.exists() and path.stat().st_mtime != mtime:
@@ -746,10 +938,18 @@ def cmd_run(args):
                     mtime = path.stat().st_mtime
                     log.error("config has an error, keeping the old one: %s", e)
 
-            state = detect(cfg, names, low)
+            gap = time.clock_gettime(boottime) - time.monotonic() if boottime is not None else 0.0
+            if gap - sleep_gap > 5:
+                log.info("woke from sleep, re-applying settings")
+                last = None  # some settings reset during suspend
+                auto.prev_cpu = None
+            sleep_gap = gap
+
+            state = detect(cfg, names, low, inputs)
             low = state.low_battery
-            key = (state.appid, state.ac, state.low_battery, state.screen)
+            key = (state.appid, state.ac, state.low_battery, state.screen, state.input)
             now = time.monotonic()
+            tuner.set_charge_limit(state.ac and not state.screen.internal, settings.get("docked_charge_limit", 0))
             # Steam applies its own per-game settings a few seconds after launch, so apply once more after that.
             resettle = not settled and now - applied_at >= settings.get("settle_seconds", 8)
             if key != last or resettle:
@@ -768,7 +968,7 @@ def cmd_run(args):
                     knobs = f"{final['tdp']}W, {final['fps'] or 'unlimited'} FPS"
                     status["events"] = (status["events"] + [
                         f"{time.strftime('%H:%M')}  {game_label(state) or 'no game'} | {power_label(state)} | "
-                        f"{state.screen.name} -> {knobs}"])[-8:]
+                        f"{state.screen.name} | {INPUT_LABELS[state.input]} -> {knobs}"])[-8:]
                 tuner.apply(final)
                 note_auto(tuner, final)
                 for key_name, r in tuner.results.items():
@@ -831,7 +1031,8 @@ def cmd_check(args):
          else f"Background service is {active or 'not installed'}. Fix: deckopt restart")
 
     state = detect(cfg, GameNames(cfg.get("settings", {}).get("user", "deck")), False)
-    line(None, f"Right now: {game_label(state) or 'no game running'}, {power_label(state)}, {state.screen.describe()}")
+    line(None, f"Right now: {game_label(state) or 'no game running'}, {power_label(state)}, {state.screen.describe()}, "
+               f"{INPUT_LABELS[state.input]}")
 
     if not data or not data.get("current"):
         line(False, "The service hasn't recorded anything yet. Fix: deckopt restart, wait 20 seconds, check again")
@@ -840,15 +1041,17 @@ def cmd_check(args):
     print()
     where = "in Game Mode" if rec["game_mode"] else "in Desktop Mode"
     print(color(1, f"{'While playing ' + rec['game'] if rec['game'] else 'Last update'} ({ago(rec['time'])}, {where}):"))
-    print(f"      {rec['power']}, {rec['screen']}")
+    print(f"      {rec['power']}, {rec['screen']}, {rec.get('input', '')}")
     labels = [("tdp", "Power limit"), ("gpu", "GPU clock"), ("fps", "FPS cap"), ("refresh", "Refresh rate"),
-              ("smt", "Hyperthreading"), ("cpu_boost", "CPU boost")]
+              ("smt", "Hyperthreading"), ("cpu_boost", "CPU boost"), ("cpu_epp", "CPU power preference")]
     for key, label in labels:
         r = rec["results"].get(key)
         if r:
             line(r["ok"], f"{label}: {r['detail']}")
     for p in rec["problems"]:
         line(False, p)
+    if data.get("memory"):
+        line(data["memory"]["ok"], f"Memory tweaks: {data['memory']['detail']}")
     if rec["game"] and not rec["game_mode"]:
         line(False, "Game Mode wasn't detected, so the FPS cap and refresh rate were skipped")
     if not data.get("last_game"):

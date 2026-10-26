@@ -15,12 +15,16 @@
 #                "max" = highest such rate (lowest latency), "fps" = lowest (saves power), e.g. 40fps -> 40Hz
 #   smt       = true | false     CPU hyperthreading
 #   cpu_boost = true | false     CPU turbo boost
+#   cpu_epp   = "power" | "balance_power" | "balance_performance" | "performance"
+#                                how eagerly the CPU clocks up (SteamOS 3.7.5+)
 #
 # Any profile table can have sub-tables for conditions:
 #   .battery / .ac               power source
 #   .internal / .external        built-in screen vs. any monitor/TV
 #   .tv / .monitor               which kind of external screen (TVs: "TV" in the name, 80cm+ wide,
 #                                or HDMI data with no fixed size, e.g. projectors)
+#   .deck / .controller / .kbm   what you're playing with: the Deck's own controls, a controller,
+#                                or keyboard and mouse (whichever was used last; ."ac+kbm" etc. work too)
 #   ."battery+internal" etc.     both at once
 #   .low_battery                 on battery and below low_battery_percent
 #
@@ -39,6 +43,9 @@ settle_seconds = 8
 low_battery_percent = 20
 user = "deck"
 gamescope_display = ":0"
+memory_tweaks = true     # CryoUtilities' recommended memory settings; originals restored if DeckOpt stops
+docked_charge_limit = 0  # e.g. 80: stop charging at 80% while docked (TV/monitor + charger) to spare the
+                         # battery; your normal limit comes back when you undock. 0 = off
 
 # ---------------------------------------------------------------- every game
 
@@ -49,10 +56,12 @@ fps = "refresh"
 refresh = "max"
 smt = true
 cpu_boost = true
+cpu_epp = "balance_performance"
 
 [profile.battery]
 tdp = 10                 # with auto_tdp this is the ceiling; light games settle lower on their own
 auto_tdp = true
+cpu_epp = "balance_power"
 fps = 40
 refresh = "fps"          # 40fps @ 40Hz feels much smoother than 40fps @ 60Hz
 
@@ -73,6 +82,13 @@ fps = "auto"             # fit the cap to the monitor/TV's refresh rate so frame
 tdp = 7
 fps = 30
 cpu_boost = false
+cpu_epp = "power"
+
+[profile."ac+kbm"]       # keyboard and mouse on the charger: favour responsiveness over even pacing
+fps = "refresh"          # run up to the screen's refresh rate (144 on a 144Hz monitor)
+
+# [profile.controller]   # e.g. couch play on a TV with a controller
+# fps = 30
 
 # ---------------------------------------------------------------- specific screens
 # Name comes from the screen's EDID; `deckopt status` shows it.
