@@ -830,6 +830,10 @@ def load_config(path):
 INPUT_LABELS = {"deck": "Deck controls", "controller": "controller", "kbm": "keyboard+mouse"}
 
 
+def input_label(state):
+    return INPUT_LABELS[state.input] + (f" ({state.input_name})" if state.input != "deck" else "")
+
+
 def power_label(state):
     if state.ac:
         return "charger"
@@ -851,7 +855,7 @@ def summarize(state, final, trail):
     if final.get("cpu_epp"):
         knobs += f", cpu {final['cpu_epp'].replace('_', ' ')}"
     return (f"game: {game} | power: {power} | screen: {state.screen.describe()} | "
-            f"input: {INPUT_LABELS[state.input]} ({state.input_name})\n"
+            f"input: {input_label(state)}\n"
             f"  -> {knobs}\n  layers: {' > '.join(trail)}")
 
 
@@ -894,7 +898,7 @@ def save_state(data):
 def record(status, state, final, tuner, problems):
     status["current"] = {
         "time": time.time(), "game": game_label(state), "power": power_label(state),
-        "screen": state.screen.describe(), "input": f"{INPUT_LABELS[state.input]} ({state.input_name})", "target": final, "results": dict(tuner.results),
+        "screen": state.screen.describe(), "input": input_label(state), "target": final, "results": dict(tuner.results),
         "problems": problems, "game_mode": tuner.results.get("fps", {}).get("ok") is not None,
     }
     if state.appid:
