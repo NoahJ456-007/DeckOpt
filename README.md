@@ -20,19 +20,33 @@ and sets:
 When docked, the frame cap follows the TV/monitor's own refresh rate, and you can give a specific
 screen its own profile by name.
 
-## Install (on the Deck)
+## Install
 
-1. Copy the `DeckOpt` folder to the Deck, using a USB stick, `scp`, or KDE Connect.
-2. Switch to **Desktop Mode** and open **Konsole**.
-3. If you've never set a sudo password: `passwd`
-4. Run:
-   ```sh
-   cd ~/DeckOpt        # wherever you copied it
-   sudo ./install.sh
-   ```
+On the Deck, switch to **Desktop Mode**, open **Konsole**, and paste:
 
-It installs to `/var/lib/deckopt` (survives SteamOS updates) and starts a systemd service.
-Go back to Game Mode and play.
+```sh
+curl -fsSL https://raw.githubusercontent.com/NoahJ456-007/DeckOpt/main/install.sh | bash
+```
+
+That's it. It asks for your password (and helps you create one if you never have), installs
+the background service, and puts three shortcuts on your desktop:
+
+| Shortcut | What it does |
+|---|---|
+| **Update DeckOpt** | Gets the latest version from GitHub (your profiles are kept) |
+| **DeckOpt Status** | Shows the detected game, power and screen, and the settings in use |
+| **Edit DeckOpt Profiles** | Opens your profiles file |
+
+Go back to Game Mode and play. It keeps running across reboots and SteamOS updates.
+
+**Using the shortcuts from Game Mode:** in Desktop Mode, open Steam → *Add a Game → Add a
+Non-Steam Game* and tick "Update DeckOpt" and "DeckOpt Status".
+
+## Update
+
+Double-click **Update DeckOpt**, or run `deckopt update`. If you're already on the latest
+version it says so and stops. Your `profiles.toml` is never overwritten. The newest example
+profiles are saved next to it as `profiles.example.toml` so you can copy in anything new.
 
 **Important:** in the Quick Access menu → Performance, leave **TDP limit, GPU clock, frame limit and
 refresh rate** unchanged (and turn off "Use per-game profile"). Otherwise Steam and DeckOpt will
@@ -41,7 +55,7 @@ catch Steam's own launch-time settings.
 
 ## Your profiles
 
-Edit `~/.config/deckopt/profiles.toml`. Changes apply live. Layers stack from general to
+Edit `~/.config/deckopt/profiles.toml` (or run `deckopt edit`). Changes apply live. Layers stack from general to
 specific, and later ones win:
 
 ```
@@ -68,7 +82,7 @@ fps = 60
 To find a game's AppId and your screen's name, start the game and run in Konsole:
 
 ```sh
-deckopt status          # or: python3 /var/lib/deckopt/deckopt.py status
+deckopt status
 ```
 
 ```
@@ -81,12 +95,15 @@ game: ELDEN RING (1245620) | power: charger | screen: LG TV SSCR2 (DP-1 1920x108
 
 | | |
 |---|---|
-| `deckopt status` | Show what's detected and what would be applied |
-| `deckopt apply` | Apply once now |
-| `deckopt run` | The background loop (the service runs this) |
-| `-n / --dry-run` | Log what would be written without touching anything |
-| `journalctl -u deckopt -f` | Watch it switch profiles live |
-| `sudo ./install.sh --uninstall` | Remove it (keeps your profiles) |
+| `deckopt status` | Show what's detected and what's being applied |
+| `deckopt update` | Update to the latest version |
+| `deckopt edit` | Open your profiles |
+| `deckopt log` | Watch it switch profiles live |
+| `deckopt restart` | Restart the service |
+| `deckopt version` | Show the installed version |
+| `deckopt uninstall` | Remove it (keeps your profiles) |
+
+Open a new Konsole window after installing so the `deckopt` command is found.
 
 ## Notes
 
