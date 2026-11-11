@@ -16,3 +16,6 @@
 #
 # [display."LG TV SSCR2"]  # one particular TV
 # fps = 30
+#
+# [graphics."2694490".battery.values.DISPLAY]   # Path of Exile 2's own settings on battery (see the example file)
+# texture_quality = "TextureQualityMedium"

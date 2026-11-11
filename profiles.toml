@@ -40,6 +40,9 @@
 # Layers apply in this order, later ones win:
 #   profile -> display."<screen>" -> game."<id or name>" -> profile.low_battery -> game.<..>.low_battery
 #
+# [graphics."<AppId>"] tables go one step further and edit the game's OWN graphics settings file (see the
+# end of this file). Those have the same .battery/.ac/.tv/... sub-tables, each with a `values` table.
+#
 # This file only needs what you want to change: DeckOpt's built-in profiles (which updates add to)
 # sit underneath it, and anything set here wins.
 #
@@ -170,3 +173,93 @@ tdp = 9
 tdp = 6
 [game.268910.external]
 fps = 60
+
+[game.2694490]           # Path of Exile 2: heavy; full power and a steady 30 on battery, adaptive on the charger.
+[game.2694490.battery]   # Its own graphics settings are turned down too, see [graphics."2694490"] below.
+tdp = 15
+fps = 30
+[game.2694490.external]
+fps = 30
+
+# ---------------------------------------------------------------- in-game graphics settings
+# A [graphics."<AppId>"] rule edits the game's own settings file so the game itself runs lighter, on top of
+# the system tuning above. The values are written while the game is NOT running (games read their settings
+# at startup and save them on exit): right after it quits, when the charger or screen changes with no game
+# open, and when DeckOpt starts. So what's in the file is always for the NEXT launch, chosen for the state at
+# that moment: unplug the Deck while playing and the low settings arrive when you next start the game.
+# Changing one of these settings in the game's own menu only lasts until the game quits; to keep your choice,
+# set it here instead or drop the key from your copy of the rule.
+#
+#   file    = "<path>" or ["<path>", ...]   relative to the game's Proton prefix user folder
+#             (…/compatdata/<AppId>/pfx/drive_c/users/steamuser), or to the install folder with root = "install".
+#             May contain * wildcards; it must match exactly one file. Several paths = try each.
+#   format  = "ini"                         (the only format so far)
+#   preset  = "unreal"                      start from a built-in template (see [graphics.unreal])
+#   values.<SECTION>.<key> = value          what to set; .battery/.ac/.tv/.monitor/.internal/.external/
+#                                           .deck/.controller/.kbm/."ac+tv"… sub-tables override, later wins
+#
+# Only keys the game has already written are changed, byte for byte otherwise (encoding, line endings,
+# comments and order are kept). Keys that aren't in the file are skipped and listed by DeckOpt Check.
+# The untouched original is kept in /var/lib/deckopt/graphics-backup and put back by "DeckOpt On-Off" (off)
+# and by uninstalling, not on every service stop.
+
+[graphics."2694490"]     # Path of Exile 2: poe2_production_Config.ini only exists after the first launch.
+file = ["Documents/My Games/Path of Exile 2/poe2_production_Config.ini",
+        "My Documents/My Games/Path of Exile 2/poe2_production_Config.ini"]  # older Proton prefixes
+# Key names and values come from real poe2_production_Config.ini dumps, not from memory:
+#   github.com/Lailloken/Exile-UI/issues/717 (Jan 2026), github.com/doitsujin/dxvk/issues/4530 (Dec 2024),
+#   pathofexile.com/forum/view-thread/3750303 (Apr 2025), /view-thread/3828771 (Aug 2025),
+#   /view-thread/3885340 (TextureQualityMedium); the prefix path from github.com/ValveSoftware/Proton/issues/8296.
+# Seen values: shadow_type High/Low; light_quality 0/2 ("number of lights"); global_illumination_detail 0;
+#   water_detail 0/1; texture_quality TextureQualityLow/Medium/High; texture_filtering 2/8/16 (anisotropic);
+#   upscale_quality Quality/Balanced/Performance; vsync Adaptive/Off; dynamic_resolution_fps 30..120.
+# Not set on purpose: resolution and upscale mode (Game Mode handles the screen), renderer, HDR, brightness.
+[graphics."2694490".values.DISPLAY]        # every state: performance first
+shadow_type = "Low"
+light_quality = 0
+global_illumination_detail = 0           # lighting = shadows only, no GI
+use_dynamic_particle_culling2 = true     # "dynamic culling": drops off-screen/far particle effects
+use_dynamic_resolution = true            # render lower when the frame rate drops below the target
+vsync = "Off"                            # Game Mode syncs frames itself
+framerate_limit_enabled = true
+background_framerate_limit_enabled = true
+background_framerate_limit = 30
+[graphics."2694490".battery.values.DISPLAY]   # lowest: steady 30fps and battery life
+texture_quality = "TextureQualityLow"
+texture_filtering = 2
+water_detail = 0
+dynamic_resolution_fps = 30
+framerate_limit = 30
+upscale_quality = "Performance"
+[graphics."2694490".ac.values.DISPLAY]        # charger (TV, monitor or built-in): a little nicer, still light
+texture_quality = "TextureQualityMedium"
+texture_filtering = 8
+water_detail = 1
+dynamic_resolution_fps = 40
+framerate_limit = 60
+upscale_quality = "Balanced"
+
+# Template for Unreal Engine games: their GameUserSettings.ini keeps the quality sliders as sg.* keys, 0 = low,
+# 1 = medium, 2 = high, 3 = epic. Only used by games that opt in, e.g.
+#   [graphics."1234567"]
+#   preset = "unreal"
+# (your own values tables override the template's). Only keys the game has already written are changed.
+[graphics.unreal]
+file = "AppData/Local/*/Saved/Config/Windows*/GameUserSettings.ini"
+[graphics.unreal.values.ScalabilityGroups]
+"sg.ShadowQuality" = 0
+"sg.GlobalIlluminationQuality" = 0
+"sg.ReflectionQuality" = 0
+"sg.PostProcessQuality" = 1
+"sg.EffectsQuality" = 1
+"sg.FoliageQuality" = 1
+"sg.ShadingQuality" = 1
+"sg.ViewDistanceQuality" = 1
+"sg.TextureQuality" = 1
+"sg.AntiAliasingQuality" = 1
+[graphics.unreal.battery.values.ScalabilityGroups]
+"sg.PostProcessQuality" = 0
+"sg.EffectsQuality" = 0
+"sg.FoliageQuality" = 0
+"sg.ShadingQuality" = 0
+"sg.TextureQuality" = 0

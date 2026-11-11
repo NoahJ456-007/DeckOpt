@@ -47,6 +47,8 @@ uninstall() {
     local user=${SUDO_USER:-deck} home
     home=$(getent passwd "$user" | cut -d: -f6)
     systemctl disable --now deckopt.service 2>/dev/null || true
+    # Put the games' own settings files back the way they were before DeckOpt edited them.
+    [[ -f $APP_DIR/deckopt.py ]] && python3 "$APP_DIR/deckopt.py" graphics-restore || true
     rm -rf "$APP_DIR" "$UNIT"
     rm -f "$home/.local/bin/deckopt" "$home"/.local/share/applications/deckopt-*.desktop "$home"/Desktop/deckopt-*.desktop
     systemctl daemon-reload
@@ -92,7 +94,8 @@ case "\${1:-status}" in
     log|logs)  exec sudo journalctl -u deckopt -f -o cat ;;
     restart)   exec sudo systemctl restart deckopt ;;
     toggle)    if systemctl is-active --quiet deckopt; then
-                   sudo systemctl stop deckopt && echo "DeckOpt is OFF: stock settings restored until you turn it on or restart the Deck."
+                   sudo systemctl stop deckopt && { sudo python3 "\$APP/deckopt.py" graphics-restore
+                   echo "DeckOpt is OFF: stock settings (and the games' own settings) restored until you turn it on or restart the Deck."; }
                else
                    sudo systemctl start deckopt && echo "DeckOpt is ON."
                fi ;;

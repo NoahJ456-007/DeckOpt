@@ -11,6 +11,7 @@ Needs root for the sysfs writes; run it through the bundled systemd service.
 """
 
 import argparse
+import codecs
 import glob
 import json
 import logging
@@ -20,9 +21,11 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from dataclasses import dataclass
@@ -244,11 +247,50 @@ def panel_info():
     return PANELS.get(read(sysfs("/sys/class/dmi/id/product_name"), ""), PANELS["Jupiter"])
 
 
+def user_home(user):
+    """The Deck user's home. The service runs as root, so it can't just use $HOME."""
+    try:
+        return pwd.getpwnam(user).pw_dir
+    except KeyError:
+        return f"/home/{user}"
+
+
+def steam_root(user):
+    """The user's Steam directory: the native install, the ~/.steam symlink, or the flatpak."""
+    home = user_home(user)
+    for rel in (".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/data/Steam"):
+        path = Path(sysfs(f"{home}/{rel}"))
+        if (path / "steamapps").is_dir():
+            return path
+    return Path(sysfs(f"{home}/.local/share/Steam"))
+
+
+def steam_libraries(steam):
+    """Every Steam library (internal storage, SD card, ...) from libraryfolders.vdf, the main one first."""
+    libraries = [steam]
+    vdf = read(steam / "steamapps" / "libraryfolders.vdf", "")
+    for p in re.findall(r'"path"\s+"([^"]+)"', vdf):
+        lib = Path(sysfs(p.replace("\\\\", "\\")))
+        if lib not in libraries:
+            libraries.append(lib)
+    return libraries
+
+
+def find_app(steam, appid):
+    """(library, installdir) of an installed Steam game, from its appmanifest; (None, None) if not installed."""
+    for lib in steam_libraries(steam):
+        acf = read(lib / "steamapps" / f"appmanifest_{appid}.acf")
+        if acf is not None:
+            m = re.search(r'"installdir"\s+"([^"]*)"', acf)
+            return lib, m.group(1) if m else None
+    return None, None
+
+
 class GameNames:
     """Looks up game names from Steam's appmanifest files (internal storage and SD card)."""
 
     def __init__(self, user):
-        self.steam = Path(sysfs(f"/home/{user}/.local/share/Steam"))
+        self.steam = steam_root(user)
         self.cache = {}
 
     def get(self, appid):
@@ -259,10 +301,7 @@ class GameNames:
         return self.cache[appid]
 
     def _lookup(self, appid):
-        libraries = [self.steam]
-        vdf = read(self.steam / "steamapps" / "libraryfolders.vdf", "")
-        libraries += [Path(sysfs(p)) for p in re.findall(r'"path"\s+"([^"]+)"', vdf)]
-        for lib in libraries:
+        for lib in steam_libraries(self.steam):
             acf = read(lib / "steamapps" / f"appmanifest_{appid}.acf", "")
             m = re.search(r'"name"\s+"([^"]*)"', acf)
             if m:
@@ -466,16 +505,19 @@ def find_controller(tables, state):
     return None, None
 
 
+def layer_suffixes(state):
+    """Names of the condition sub-tables that apply to this state, most general first ("" = the table itself)."""
+    kind = None if state.screen.internal else state.screen.kind
+    suffixes = ["", state.power, state.where, kind, state.input, f"{state.power}+{state.where}",
+                kind and f"{state.power}+{kind}", f"{state.power}+{state.input}"]
+    return [s for s in suffixes if s is not None]
+
+
 def merge_layer(table, state, label, out, trail):
     """Merge one profile table and its condition sub-tables, most general first."""
     if not table:
         return
-    kind = None if state.screen.internal else state.screen.kind
-    suffixes = ["", state.power, state.where, kind, state.input, f"{state.power}+{state.where}",
-                kind and f"{state.power}+{kind}", f"{state.power}+{state.input}"]
-    for suffix in suffixes:
-        if suffix is None:
-            continue
+    for suffix in layer_suffixes(state):
         sub = table.get(suffix) if suffix else table
         if isinstance(sub, dict):
             values = {k: v for k, v in sub.items() if k in SETTING_KEYS}
@@ -1115,6 +1157,250 @@ class AdaptiveFPS:
         return cap
 
 
+# --- In-game graphics settings ---------------------------------------------
+#
+# Some games only run well on the Deck once their own graphics settings are turned down. A [graphics."<appid>"]
+# rule names the game's settings file and the values to put in it, with .battery/.ac/.tv/... sub-tables like
+# the system profiles. Games read that file when they start and write it back when they quit, so it is only
+# ever edited while the game is NOT running: right after it quits, when the charger or screen changes with no
+# game open, and when the service starts. What goes in is for the *next* launch, chosen for the state at the
+# time of writing. Only keys the game itself has written are changed; nothing is ever added.
+
+
+def write_atomic(path, data):
+    """Replaces a file's contents in one step (temp file beside it, then rename) and keeps the owner, group and
+    permissions: the service runs as root, but these are the user's files."""
+    st = path.stat()
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".deckopt")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except PermissionError:
+            pass  # not root: it's our own file anyway
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class IniFile:
+    """Changes values in an ini file and nothing else: encoding (UTF-8 or UTF-16, with or without a BOM), line
+    endings, key order, spacing, comments and sections all come back byte for byte. Only keys that already
+    exist are touched; which keys exist is the game's business."""
+
+    BOMS = ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be"))
+    SECTION = re.compile(r"^\s*\[(.*?)\]\s*$")
+    KEY = re.compile(r"^(\s*)([^\s=;#\[][^=]*?)(\s*=\s*)(.*?)(\s*)$")
+
+    def __init__(self, data):
+        self.bom, self.encoding, self.changed = b"", "utf-8", False
+        for bom, encoding in self.BOMS:
+            if data.startswith(bom):
+                self.bom, self.encoding = bom, encoding
+                break
+        else:
+            if data.count(b"\0") > len(data) // 4:  # UTF-16 without a BOM
+                self.encoding = "utf-16-le" if data[1:2] == b"\0" else "utf-16-be"
+        body = data[len(self.bom):]
+        try:
+            text = body.decode(self.encoding)
+        except UnicodeDecodeError:
+            self.encoding = "latin-1"  # unknown 8-bit encoding: keep every byte as it is
+            text = body.decode(self.encoding)
+        self.lines = []  # (content, line ending)
+        for raw in re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", text):
+            content = raw.rstrip("\r\n")
+            self.lines.append((content, raw[len(content):]))
+
+    def set(self, section, key, value):
+        """Returns True if the key is in the file (now set to value), False if it isn't (nothing is added)."""
+        current = ""
+        for i, (content, ending) in enumerate(self.lines):
+            m = self.SECTION.match(content)
+            if m:
+                current = m.group(1).strip().lower()
+                continue
+            if current != section.lower():
+                continue
+            m = self.KEY.match(content)
+            if m and m.group(2).lower() == key.lower():
+                if m.group(4) != value:
+                    self.lines[i] = (m.group(1) + m.group(2) + m.group(3) + value + m.group(5), ending)
+                    self.changed = True
+                return True
+        return False
+
+    def dump(self):
+        return self.bom + "".join(content + ending for content, ending in self.lines).encode(self.encoding)
+
+
+GRAPHICS_FORMATS = {"ini": IniFile}  # json/xml editors would slot in here with the same set()/dump()/changed
+BACKUP_DIR = Path(os.environ.get("DECKOPT_BACKUPS") or Path(__file__).with_name("graphics-backup"))
+
+
+def ini_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def graphics_values(rule, state):
+    """{section: {key: value}} for this state, layered like the system profiles: the rule's own `values`, then
+    those of .battery/.ac, .internal/.external, .tv/.monitor, .deck/.controller/.kbm, ."ac+tv" and so on."""
+    out, trail = {}, []
+    for suffix in layer_suffixes(state):
+        sub = rule.get(suffix) if suffix else rule
+        values = sub.get("values") if isinstance(sub, dict) else None
+        if isinstance(values, dict):
+            for section, keys in values.items():
+                if isinstance(keys, dict):
+                    out.setdefault(section, {}).update(keys)
+            trail.append(suffix or "base")
+    return out, trail
+
+
+class Graphics:
+    """Applies the [graphics."<appid>"] rules and records, per game, what happened (for DeckOpt Check)."""
+
+    def __init__(self, cfg, dry_run=False):
+        self.user = cfg.get("settings", {}).get("user", "deck")
+        self.dry_run = dry_run
+        self.steam = steam_root(self.user)
+        self.results = {}  # appid -> {"game", "ok", "detail", "time"}; ok: True applied, None waiting, False failed
+        self.warned = set()
+
+    @staticmethod
+    def rules(cfg):
+        """Game rules (keyed by AppId) with their preset merged in. Non-numeric keys are presets, e.g. `unreal`."""
+        tables = cfg.get("graphics") or {}
+        rules = {}
+        for key, rule in tables.items():
+            if not isinstance(rule, dict) or not str(key).isdigit():
+                continue
+            preset = tables.get(rule.get("preset"))
+            rules[str(key)] = deep_merge(preset, rule) if isinstance(preset, dict) else rule
+        return rules
+
+    def apply_all(self, cfg, state, names):
+        if running_appid() is not None:
+            return  # never while a game is running: it would overwrite the file on exit anyway
+        for appid, rule in self.rules(cfg).items():
+            self.apply(appid, rule, state, names.get(appid) or f"game {appid}")
+
+    def locate(self, appid, rule):
+        """The game's settings file, or (None, why not)."""
+        lib, installdir = find_app(self.steam, appid)
+        if lib is None:
+            return None, (None, "not installed")
+        if rule.get("root", "prefix") == "install":
+            base = lib / "steamapps" / "common" / (installdir or "")
+        else:  # the Proton prefix's Windows user folder: Documents, AppData, ...
+            base = lib / "steamapps" / "compatdata" / appid / "pfx" / "drive_c" / "users" / "steamuser"
+        patterns = rule.get("file")
+        patterns = [patterns] if isinstance(patterns, str) else list(patterns or [])
+        found = []
+        for pattern in patterns:
+            for path in sorted(glob.glob(str(base / pattern))):
+                if os.path.isfile(path) and not any(os.path.samefile(path, f) for f in found):
+                    found.append(path)
+        if not found:
+            return None, (None, "waiting for the first launch (the game writes its settings file then)")
+        if len(found) > 1:
+            return None, (False, f"{len(found)} settings files match, not sure which to edit")
+        return Path(found[0]), None
+
+    def apply(self, appid, rule, state, game):
+        result = self.results[appid] = {"game": game, "ok": None, "detail": "", "time": time.time()}
+        path, problem = self.locate(appid, rule)
+        if problem:
+            result["ok"], result["detail"] = problem
+            return
+        editor = GRAPHICS_FORMATS.get(rule.get("format", "ini"))
+        if not editor:
+            result["ok"], result["detail"] = False, f"unknown format \"{rule.get('format')}\""
+            return
+        values, trail = graphics_values(rule, state)
+        wanted = [(s, k, v) for s, keys in values.items() for k, v in keys.items()]
+        if not wanted:
+            result["detail"] = "nothing to set for this state"
+            return
+        try:
+            data = path.read_bytes()
+            self.backup(appid, path, data)
+            doc = editor(data)
+            skipped = [f"{s}.{k}" if s else k for s, k, v in wanted if not doc.set(s, k, ini_value(v))]
+            if doc.changed and not self.dry_run:
+                write_atomic(path, doc.dump())
+        except OSError as e:
+            result["ok"], result["detail"] = False, f"{path.name}: {e.strerror or e}"
+            log.warning("game settings for %s not applied: %s", game, result["detail"])
+            return
+        where = "built-in screen" if state.screen.internal else state.screen.kind
+        label = f"{'charger' if state.ac else 'battery'} + {where}"
+        if len(values) == 1:  # one section: the key names alone are clearer
+            skipped = [k.split(".", 1)[1] if "." in k else k for k in skipped]
+        short = ", ".join(skipped[:3]) + (f", +{len(skipped) - 3} more" if len(skipped) > 3 else "")
+        if len(skipped) == len(wanted):
+            result["ok"] = False
+            result["detail"] = f"none of the keys are in {path.name} ({short})"
+        else:
+            result["ok"] = True
+            result["detail"] = f"{len(wanted) - len(skipped)} settings for {label}"
+            if skipped:
+                result["detail"] += f"; {len(skipped)} not in the file, skipped ({short})"
+        if doc.changed:
+            log.info("game settings for %s: %s (%s)", game, result["detail"], " > ".join(trail))
+        if skipped and (appid, tuple(skipped)) not in self.warned:
+            self.warned.add((appid, tuple(skipped)))
+            log.warning("game settings for %s: keys not in %s, skipped: %s", game, path.name, ", ".join(skipped))
+
+    def backup(self, appid, path, data):
+        """Keeps the untouched original once (first time DeckOpt sees the file), for restore_all()."""
+        dest = BACKUP_DIR / appid / path.name
+        if dest.exists() or self.dry_run:
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        dest.with_name(dest.name + ".path").write_text(str(path))
+
+    @staticmethod
+    def restore_all():
+        """Puts every backed-up settings file back as it was and forgets the backup. Used when DeckOpt is turned
+        off (`deckopt toggle`) and on uninstall, not on every service stop: a restart would otherwise undo the
+        settings for nothing, and shutdown is no time to be writing into the user's files.
+        Returns [(game dir, path, error or None)]."""
+        done = []
+        for side in sorted(BACKUP_DIR.glob("*/*.path")):
+            original = side.with_name(side.name[:-len(".path")])
+            target = Path(side.read_text().strip())
+            if running_appid() == side.parent.name:
+                done.append((side.parent.name, target, "the game is running, try again after quitting"))
+                continue
+            try:
+                if target.exists():
+                    write_atomic(target, original.read_bytes())
+                original.unlink()
+                side.unlink()
+                done.append((side.parent.name, target, None))
+            except OSError as e:
+                done.append((side.parent.name, target, str(e)))
+            try:
+                side.parent.rmdir()
+            except OSError:
+                pass
+        return done
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -1242,19 +1528,21 @@ def cmd_run(args):
     mtime = path.stat().st_mtime
     names = GameNames(cfg.get("settings", {}).get("user", "deck"))
     tuner = Tuner(cfg, args.dry_run)
+    graphics = Graphics(cfg, args.dry_run)
     auto = AutoTDP(tuner, cfg.get("settings", {}), LEARNED_FILE)
     adaptive = AdaptiveFPS(tuner, auto.learned, auto.save)
     inputs = InputWatcher()
     panel = panel_info()
     log.info("DeckOpt started (%s panel, config %s)", panel["model"], path)
     status = {"version": read(Path(__file__).with_name("VERSION"), "dev"), "started": time.time(),
-              "current": None, "last_game": None, "events": [], "memory": None}
+              "current": None, "last_game": None, "events": [], "memory": None, "graphics": {}}
     # CLOCK_MONOTONIC stops while asleep and CLOCK_BOOTTIME doesn't, so a jump in the gap means we just woke up.
     boottime = getattr(time, "CLOCK_BOOTTIME", None)  # Linux only
     sleep_gap = 0.0
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     last, low, applied_at, settled, verified_at = None, False, 0.0, True, 0.0
+    prev_appid, graphics_key, graphics_due = None, None, 0.0  # due straight away at start (if no game runs)
     state = final = None
     try:  # everything changed from here on is put back by tuner.restore(), even after a crash
         if cfg.get("settings", {}).get("memory_tweaks", False):
@@ -1271,7 +1559,7 @@ def cmd_run(args):
                 try:
                     cfg, path = load_config(path)
                     mtime = path.stat().st_mtime
-                    last = None  # force a re-apply with the new profiles
+                    last = graphics_key = None  # force a re-apply with the new profiles
                     log.info("config reloaded")
                 except tomllib.TOMLDecodeError as e:
                     mtime = path.stat().st_mtime
@@ -1302,6 +1590,18 @@ def cmd_run(args):
             key = (state.appid, state.ac, state.low_battery, state.screen, state.input)
             now = time.monotonic()
             tuner.set_charge_limit(state.ac and not state.screen.internal, settings.get("docked_charge_limit", 0))
+            # The games' own settings files: written only while no game runs, for the next launch. A game that
+            # has just quit has rewritten its file, so ours go in again a moment later.
+            if state.appid is None and prev_appid is not None:
+                graphics_due = now + 3
+            elif state.appid is None and graphics_due is None and key[1:] != graphics_key:
+                graphics_due = now
+            prev_appid = state.appid
+            if graphics_due is not None and state.appid is None and now >= graphics_due:
+                graphics.apply_all(cfg, state, names)
+                status["graphics"] = graphics.results
+                save_state(status)
+                graphics_key, graphics_due = key[1:], None
             # Steam applies its own per-game settings a few seconds after launch, so apply once more after that.
             resettle = not settled and now - applied_at >= settings.get("settle_seconds", 8)
             if key != last or resettle:
@@ -1436,6 +1736,12 @@ def cmd_check(args):
     if not data.get("last_game"):
         line(None, "No game has been played since the service started")
 
+    if data.get("graphics"):
+        print()
+        print(color(1, "Game settings (written into the game's own config, for its next launch):"))
+        for g in data["graphics"].values():
+            line(g["ok"], f"{g['game']}: {g['detail']} ({ago(g['time'])})")
+
     if data.get("events"):
         print()
         print(color(1, "Recent changes:"))
@@ -1443,10 +1749,22 @@ def cmd_check(args):
             print(f"      {e}")
 
 
+def cmd_graphics_restore(args):
+    """Puts the games' own settings files back as they were before DeckOpt touched them (root)."""
+    done = Graphics.restore_all()
+    if not done:
+        print("No game settings to put back.")
+    for _, path, err in done:
+        print(f"{'FAILED' if err else 'restored'}: {path}" + (f" ({err})" if err else ""))
+    sys.exit(1 if any(err for _, _, err in done) else 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("command", nargs="?", default="status", choices=["run", "status", "apply", "check"],
-                        help="run: background service | status: show what would be applied | apply: apply once | check: health check")
+    parser.add_argument("command", nargs="?", default="status",
+                        choices=["run", "status", "apply", "check", "graphics-restore"],
+                        help="run: background service | status: show what would be applied | apply: apply once | "
+                             "check: health check | graphics-restore: undo the in-game settings changes")
     parser.add_argument("-c", "--config", default=default_config())
     parser.add_argument("-n", "--dry-run", action="store_true", help="log changes instead of writing them")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1457,6 +1775,8 @@ def main():
         cmd_run(args)
     elif args.command == "check":
         cmd_check(args)
+    elif args.command == "graphics-restore":
+        cmd_graphics_restore(args)
     else:
         cmd_status(args, apply=args.command == "apply")
 

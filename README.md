@@ -28,6 +28,26 @@ Deck the moment any of these change:
 - Hand-tuned profiles for some games (Elden Ring, Cyberpunk, Hades, Stardew, Terraria, Cuphead).
   Updates add more, and your own settings always win.
 
+### In-game graphics settings too
+
+For some games the system knobs aren't enough: the game's own settings have to come down. DeckOpt
+can edit a game's settings file for you, per power source and screen. Path of Exile 2 is built in:
+low textures, shadows and lighting with dynamic resolution aimed at 30 FPS on battery, a notch higher
+(medium textures, 40 FPS target) on the charger. How it works, and what to expect:
+
+- Games read their settings at startup and save them on exit, so DeckOpt writes the file only while
+  the game is **not** running: right after it quits, when you plug in or dock with no game open, and
+  when the service starts. The file always holds the settings for the **next launch**, chosen for the
+  state at that moment. Unplug mid-game and the battery settings are there the next time you start it.
+- Only keys the game itself has already written are changed. Nothing is added, and encoding, line
+  endings, comments and order are kept byte for byte. Keys that aren't in the file are skipped and
+  listed by DeckOpt Check. PoE2's file only exists after the first launch; until then Check says so.
+- The original file is kept in `/var/lib/deckopt/graphics-backup` and put back by **DeckOpt On-Off**
+  (off) and by uninstalling. A plain service restart leaves the settings in place.
+- Changing one of these settings in the game's own menu lasts until the game quits; to keep your choice,
+  set it in your profiles instead. Add your own games with `[graphics."<AppId>"]`: see
+  `profiles.example.toml` (there is also a template for Unreal Engine games, `preset = "unreal"`).
+
 ### Optimized for whatever it's plugged into
 
 - **TVs and monitors are told apart**: "TV" in the name, a big screen (80cm+), or HDMI data with no
