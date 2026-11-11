@@ -687,5 +687,6 @@ mod bundled_tests {
         assert_eq!(d(&ac, "framerate_limit"), "60");
         assert_eq!(d(&ac, "texture_quality"), "TextureQualityMedium");
         assert_eq!(d(&bat, "use_dynamic_resolution"), "true");
+        assert_eq!(d(&ac, "dynamic_resolution_fps"), "60");
     }
 }

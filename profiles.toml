@@ -174,10 +174,13 @@ tdp = 6
 [game.268910.external]
 fps = 60
 
-[game.2694490]           # Path of Exile 2: heavy; full power and a steady 30 on battery, adaptive on the charger
-[game.2694490.battery]   # (TV included: aims for 60, steps down only if it can't hold it).
-tdp = 15                 # Its own graphics settings are turned down too, see [graphics."2694490"] below.
+[game.2694490]           # Path of Exile 2: heavy; full power and a steady 30 on battery, 60 on the charger.
+[game.2694490.battery]   # Its own graphics settings are turned down too, see [graphics."2694490"] below.
+tdp = 15
 fps = 30
+[game.2694490.ac]        # The game's own dynamic resolution holds 60 by lowering sharpness, so DeckOpt's
+fps = 60                 # adaptive FPS would only fight it (the GPU always looks busy and it never steps
+adaptive_fps = false     # back up); a fixed 60 cap instead.
 
 # ---------------------------------------------------------------- in-game graphics settings
 # A [graphics."<AppId>"] rule edits the game's own settings file so the game itself runs lighter, on top of
@@ -233,7 +236,7 @@ upscale_quality = "Performance"
 texture_quality = "TextureQualityMedium"
 texture_filtering = 8
 water_detail = 1
-dynamic_resolution_fps = 40
+dynamic_resolution_fps = 60   # same as the cap, so the game lowers sharpness instead of fps
 framerate_limit = 60
 upscale_quality = "Balanced"
 
