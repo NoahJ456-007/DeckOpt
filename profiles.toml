@@ -174,11 +174,9 @@ tdp = 6
 [game.268910.external]
 fps = 60
 
-[game.2694490]           # Path of Exile 2: heavy; full power and a steady 30 on battery, adaptive on the charger.
-[game.2694490.battery]   # Its own graphics settings are turned down too, see [graphics."2694490"] below.
-tdp = 15
-fps = 30
-[game.2694490.external]
+[game.2694490]           # Path of Exile 2: heavy; full power and a steady 30 on battery, adaptive on the charger
+[game.2694490.battery]   # (TV included: aims for 60, steps down only if it can't hold it).
+tdp = 15                 # Its own graphics settings are turned down too, see [graphics."2694490"] below.
 fps = 30
 
 # ---------------------------------------------------------------- in-game graphics settings
