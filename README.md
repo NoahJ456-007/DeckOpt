@@ -102,23 +102,23 @@ curl -fsSL https://raw.githubusercontent.com/NoahJ456-007/DeckOpt/main/install.s
 ```
 
 That's it. It asks for your password (and helps you create one if you never have), installs
-the background service, and puts three shortcuts on your desktop:
+the background service, and puts one **DeckOpt** app on your desktop. Open it and pick:
 
-| Shortcut | What it does |
+| Menu item | What it does |
 |---|---|
-| **Update DeckOpt** | Gets the latest version from GitHub (your profiles are kept) |
-| **DeckOpt Check** | Plain-English health check: did each setting actually apply during your last game, or did Steam override it? |
-| **Edit DeckOpt Profiles** | Opens your profiles file |
-| **DeckOpt On-Off** | Turns DeckOpt off (stock settings come back) or on again. Handy to see if something is DeckOpt's doing |
+| **Update** | Gets the latest version from GitHub (your profiles are kept) |
+| **Check** | Plain-English health check: did each setting actually apply during your last game, or did Steam override it? |
+| **Edit my profiles** | Opens your profiles file |
+| **Turn on/off** | Turns DeckOpt off (stock settings come back) or on again. Handy to see if something is DeckOpt's doing |
 
 Go back to Game Mode and play. It keeps running across reboots and SteamOS updates.
 
-**Using the shortcuts from Game Mode:** in Desktop Mode, open Steam → *Add a Game → Add a
-Non-Steam Game* and tick "Update DeckOpt" and "DeckOpt Check".
+**Using it from Game Mode:** in Desktop Mode, open Steam → *Add a Game → Add a
+Non-Steam Game* and tick "DeckOpt".
 
 ## Update
 
-Double-click **Update DeckOpt**, or run `deckopt update`. If you're already on the latest
+Open **DeckOpt** and pick Update, or run `deckopt update`. If you're already on the latest
 version it says so and stops. Your `profiles.toml` is never overwritten. The newest example
 profiles are saved next to it as `profiles.example.toml` so you can copy in anything new.
 
@@ -185,7 +185,7 @@ Open a new Konsole window after installing so the `deckopt` command is found.
 
 ## Something not working?
 
-Double-click **DeckOpt Check** in Desktop Mode. It shows what happened during your last game: each setting
+Open **DeckOpt** in Desktop Mode and pick Check. It shows what happened during your last game: each setting
 is marked OK or BAD, with the reason and the fix. You don't need to be in the game when you run it.
 
 ## Notes

@@ -103,7 +103,28 @@ case "\${1:-status}" in
     apply)     shift; exec sudo python3 "\$APP/deckopt.py" apply -c "\$CONFIG" "\$@" ;;
     status)    shift || true; exec python3 "\$APP/deckopt.py" status -c "\$CONFIG" "\$@" ;;
     check)     exec python3 "\$APP/deckopt.py" check -c "\$CONFIG" ;;
-    *)         echo "usage: deckopt [check|status|toggle|update|edit|log|restart|apply|version|uninstall]" ;;
+    menu)      # The one DeckOpt app: pick an action, see the result, come back to the menu.
+               while true; do
+                   if systemctl is-active --quiet deckopt; then state=ON; else state=OFF; fi
+                   if command -v kdialog >/dev/null && [[ -n \${DISPLAY:-}\${WAYLAND_DISPLAY:-} ]]; then
+                       choice=\$(kdialog --title DeckOpt --menu "DeckOpt is \$state. What do you want to do?" \\
+                           check  "Check: did my settings work?" \\
+                           toggle "Turn DeckOpt \$([[ \$state == ON ]] && echo off || echo on)" \\
+                           update "Update DeckOpt" \\
+                           edit   "Edit my profiles" \\
+                           quit   "Close") || exit 0
+                   else
+                       echo "DeckOpt is \$state."
+                       PS3="Pick a number: "
+                       select choice in check toggle update edit quit; do break; done
+                   fi
+                   [[ -z \$choice || \$choice == quit ]] && exit 0
+                   clear 2>/dev/null || true
+                   "\$0" "\$choice"
+                   [[ \$choice == edit ]] && continue
+                   echo; read -rp "Press Enter to go back to the menu..." _
+               done ;;
+    *)         echo "usage: deckopt [menu|check|status|toggle|update|edit|log|restart|apply|version|uninstall]" ;;
 esac
 EOF
 chmod 755 "$home/.local/bin/deckopt"
@@ -118,11 +139,9 @@ shortcut() {  # id, name, icon, command
         chmod +x "$home/Desktop/deckopt-$1.desktop"
     fi
 }
-shortcut update "Update DeckOpt" system-software-update "konsole --hold -e $home/.local/bin/deckopt update"
-rm -f "$home/.local/share/applications/deckopt-status.desktop" "$home/Desktop/deckopt-status.desktop"  # replaced by Check
-shortcut check  "DeckOpt Check" utilities-system-monitor "konsole --hold -e $home/.local/bin/deckopt check"
-shortcut edit   "Edit DeckOpt Profiles" document-edit "xdg-open $config_dir/profiles.toml"
-shortcut toggle "DeckOpt On-Off" system-shutdown "konsole --hold -e $home/.local/bin/deckopt toggle"
+# One app instead of separate Check / On-Off / Update / Edit shortcuts (older versions made those).
+rm -f "$home"/.local/share/applications/deckopt-*.desktop "$home"/Desktop/deckopt-*.desktop
+shortcut app "DeckOpt" utilities-system-monitor "konsole -e $home/.local/bin/deckopt menu"
 USER
 
     say "Starting service..."
@@ -137,8 +156,8 @@ USER
     sudo -u "$user" python3 "$APP_DIR/deckopt.py" status -c "$config_dir/profiles.toml" 2>/dev/null || true
     cat <<EOF
 
-  Desktop shortcuts:  DeckOpt Check, DeckOpt On-Off, Update DeckOpt, Edit DeckOpt Profiles
-  Commands:           deckopt check | status | update | edit | log | uninstall
+  Desktop app:        DeckOpt (Check, On-Off, Update and Edit profiles in one menu)
+  Commands:           deckopt menu | check | status | update | edit | log | uninstall
                       (open a new Konsole window first so the command is found)
 
   In Game Mode, leave Steam's Performance menu (TDP, GPU clock, frame limit, refresh rate)
