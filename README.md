@@ -173,3 +173,28 @@ is marked OK or BAD, with the reason and the fix. You don't need to be in the ga
 - FPS limit and refresh rate go through gamescope, so they only work in **Game Mode**. TDP, GPU and CPU settings work in both modes.
 - Stopping the service puts everything back to stock (15 W, auto GPU, no frame cap).
 - TDP is capped at 15 W, the Deck's stock maximum.
+
+## How it's built
+
+DeckOpt is a single static program written in Rust (`src/`, no runtime dependencies). The installer
+downloads the release build for your Deck from the [Releases page](https://github.com/NoahJ456-007/DeckOpt/releases)
+and checks its SHA-256 before installing it. If no release build can be downloaded it says so and
+falls back to the older Python version (`deckopt.py`), which has the same features.
+
+Building it yourself:
+
+```sh
+cargo build --release                                # for the machine you're on
+cargo zigbuild --release --target x86_64-unknown-linux-musl   # the Deck (needs cargo-zigbuild + zig)
+cargo test                                           # profile layering, VDF parsing, the gamescope
+                                                     # wire protocol, adaptive FPS and AutoTDP decisions
+```
+
+Put the resulting `deckopt` next to `install.sh` and run `bash install.sh` to install a local build.
+Pushing a `v*` tag builds the release binaries on GitHub Actions (`.github/workflows/release.yml`).
+
+Module map (`src/`): `detect` (game, charger, screen, EDID/DRM), `input` (keyboard/mouse watcher;
+controllers are never opened), `names` (appmanifest + shortcuts.vdf), `profile` (layer resolution),
+`tuner` (sysfs writes, gamescopectl, restore), `autotdp`, `gamescope` (raw Wayland client for frame
+times), `adaptive` (FPS ladder), `learned` (learned.json), `service` (the loop), `cli` (status/check),
+`graphics` (placeholder for the in-game graphics settings feature).

@@ -1,0 +1,22 @@
+[package]
+name = "deckopt"
+version = "2.0.0"
+edition = "2021"
+description = "Per-game Steam Deck tuning that adapts to the charger and the screen"
+license = "MIT"
+repository = "https://github.com/NoahJ456-007/DeckOpt"
+
+[dependencies]
+toml = { version = "0.8", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+# Unwinding stays on so a crash in the service loop still runs tuner.restore().
+panic = "unwind"
