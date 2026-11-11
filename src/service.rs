@@ -48,6 +48,8 @@ pub struct Status {
     pub polling: Option<Note>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub controller_batteries: Option<Vec<ControllerBattery>>,
+    #[serde(default)]
+    pub graphics: indexmap::IndexMap<String, graphics::GraphicsResult>,
 }
 
 pub fn app_dir() -> PathBuf {
@@ -179,8 +181,8 @@ pub fn run(config: &Path, dry_run: bool) -> i32 {
     install_signal_handlers();
     let mut tuner = Tuner::new(&cfg, dry_run);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_loop(cfg, path, &mut tuner, dry_run)));
-    // everything changed is put back by tuner.restore(), even after a crash
-    graphics::restore(&mut tuner);
+    // everything changed is put back by tuner.restore(), even after a crash. The games' own settings files
+    // are not: those only go back on `deckopt toggle` (off) and uninstall (see graphics::restore_all).
     tuner.restore();
     match result {
         Ok(code) => code,
@@ -197,7 +199,7 @@ fn run_loop(mut cfg: Config, path: PathBuf, tuner: &mut Tuner, dry_run: bool) ->
     let mut inputs = InputWatcher::new();
     let panel = panel_info();
     info!("DeckOpt started ({} panel, config {})", panel.model, path.display());
-    let mut status = Status { version: version(), started: now_epoch(), current: None, last_game: None, events: Vec::new(), memory: None, polling: None, controller_batteries: None };
+    let mut status = Status { version: version(), started: now_epoch(), current: None, last_game: None, events: Vec::new(), memory: None, polling: None, controller_batteries: None, graphics: Default::default() };
     // CLOCK_MONOTONIC stops while asleep and CLOCK_BOOTTIME doesn't, so a jump in the gap means we just woke up.
     let mut sleep_gap = boottime().map(|b| b - monotonic()).unwrap_or(0.0);
 
@@ -207,6 +209,10 @@ fn run_loop(mut cfg: Config, path: PathBuf, tuner: &mut Tuner, dry_run: bool) ->
     let mut settled = true;
     let mut verified_at = 0.0;
     let mut final_ = Final::stock();
+    let mut gfx = graphics::Graphics::new(&cfg, dry_run);
+    let mut prev_appid: Option<String> = None;
+    let mut graphics_key: Option<(bool, bool, crate::detect::Screen, String)> = None;
+    let mut graphics_due: Option<f64> = Some(0.0); // due straight away at start (if no game runs)
     if setting_bool(&cfg, "memory_tweaks", false) {
         tuner.apply_memory_tweaks();
         status.memory = tuner.memory_result.clone();
@@ -222,6 +228,7 @@ fn run_loop(mut cfg: Config, path: PathBuf, tuner: &mut Tuner, dry_run: bool) ->
                 Ok((new_cfg, _)) => {
                     cfg = new_cfg;
                     last = None; // force a re-apply with the new profiles
+                    graphics_key = None;
                     info!("config reloaded");
                 }
                 Err(e) => error!("config has an error, keeping the old one: {e}"),
@@ -265,6 +272,22 @@ fn run_loop(mut cfg: Config, path: PathBuf, tuner: &mut Tuner, dry_run: bool) ->
         let key = state.key();
         let now = monotonic();
         tuner.set_charge_limit(state.ac && !state.screen.internal, setting_i64(&cfg, "docked_charge_limit", 0));
+        // The games' own settings files: written only while no game runs, for the next launch. A game that has
+        // just quit has rewritten its file, so ours go in again a moment later.
+        let gkey = (key.1, key.2, key.3.clone(), key.4.clone());
+        if state.appid.is_none() && prev_appid.is_some() {
+            graphics_due = Some(now + 3.0);
+        } else if state.appid.is_none() && graphics_due.is_none() && graphics_key.as_ref() != Some(&gkey) {
+            graphics_due = Some(now);
+        }
+        prev_appid = state.appid.clone();
+        if state.appid.is_none() && graphics_due.is_some_and(|due| now >= due) {
+            gfx.apply_all(&cfg, &state, &mut |id| names.get(id));
+            status.graphics = gfx.results.clone();
+            save_state(&status);
+            graphics_key = Some(gkey);
+            graphics_due = None;
+        }
         // Steam applies its own per-game settings a few seconds after launch, so apply once more after that.
         let resettle = !settled && now - applied_at >= settle_seconds;
         if last.as_ref() != Some(&key) || resettle {
@@ -309,11 +332,6 @@ fn run_loop(mut cfg: Config, path: PathBuf, tuner: &mut Tuner, dry_run: bool) ->
                 }
             }
             tuner.apply(&final_);
-            if state.appid.is_some() {
-                if let Some(note) = graphics::apply(&cfg, &state, tuner) {
-                    tuner.results.insert("graphics".into(), note);
-                }
-            }
             note_auto(tuner, &final_);
             note_adaptive(tuner, &final_, &adaptive);
             for (key_name, r) in &tuner.results {

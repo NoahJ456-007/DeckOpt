@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::util::{list_dir, read_or, sysfs};
+use crate::util::{list_dir, read_or};
 
 pub struct GameNames {
     steam: PathBuf,
@@ -13,7 +13,7 @@ pub struct GameNames {
 
 impl GameNames {
     pub fn new(user: &str) -> GameNames {
-        GameNames { steam: sysfs(&format!("/home/{user}/.local/share/Steam")), cache: HashMap::new() }
+        GameNames { steam: crate::graphics::steam_root(user), cache: HashMap::new() }
     }
 
     pub fn get(&mut self, appid: &str) -> Option<String> {
@@ -25,10 +25,7 @@ impl GameNames {
     }
 
     fn lookup(&self, appid: &str) -> Option<String> {
-        let mut libraries = vec![self.steam.clone()];
-        let vdf = read_or(self.steam.join("steamapps").join("libraryfolders.vdf"), "");
-        libraries.extend(vdf_values(&vdf, "path").into_iter().map(|p| sysfs(&p)));
-        for lib in libraries {
+        for lib in crate::graphics::steam_libraries(&self.steam) {
             let acf = read_or(lib.join("steamapps").join(format!("appmanifest_{appid}.acf")), "");
             if let Some(name) = vdf_values(&acf, "name").into_iter().next() {
                 return Some(name);

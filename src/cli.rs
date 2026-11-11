@@ -217,6 +217,17 @@ pub fn cmd_check(config: &Path) -> i32 {
     if data.get("last_game").map(|v| v.is_null()).unwrap_or(true) {
         line(None, "No game has been played since the service started");
     }
+    if let Some(games) = data.get("graphics").and_then(|g| g.as_object()).filter(|g| !g.is_empty()) {
+        println!();
+        println!("{}", color(1, "Game settings (written into the game's own config, for its next launch):"));
+        for g in games.values() {
+            let ok = g.get("ok").and_then(|v| v.as_bool());
+            let game = g.get("game").and_then(|v| v.as_str()).unwrap_or("");
+            let detail = g.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            let time = g.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            line(ok, &format!("{game}: {detail} ({})", ago(time)));
+        }
+    }
     if let Some(events) = data.get("events").and_then(|e| e.as_array()).filter(|e| !e.is_empty()) {
         println!();
         println!("{}", color(1, "Recent changes:"));

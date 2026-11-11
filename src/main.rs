@@ -25,7 +25,7 @@ mod util;
 
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: deckopt [-h] [-c CONFIG] [-n] [-v] [{run,status,apply,check}]\n\nDeckOpt - per-game Steam Deck tuning that adapts to the charger and the screen.\n\npositional arguments:\n  {run,status,apply,check}\n                        run: background service | status: show what would be applied | apply: apply once | check: health check\n\noptions:\n  -h, --help            show this help message and exit\n  -c, --config CONFIG\n  -n, --dry-run         log changes instead of writing them\n  -v, --verbose\n  --version             print the version and exit";
+const USAGE: &str = "usage: deckopt [-h] [-c CONFIG] [-n] [-v] [{run,status,apply,check,graphics-restore}]\n\nDeckOpt - per-game Steam Deck tuning that adapts to the charger and the screen.\n\npositional arguments:\n  {run,status,apply,check,graphics-restore}\n                        run: background service | status: show what would be applied | apply: apply once | check: health check | graphics-restore: undo the in-game settings changes\n\noptions:\n  -h, --help            show this help message and exit\n  -c, --config CONFIG\n  -n, --dry-run         log changes instead of writing them\n  -v, --verbose\n  --version             print the version and exit";
 
 fn main() {
     let mut command = "status".to_string();
@@ -51,11 +51,11 @@ fn main() {
                 None => usage_error("argument -c/--config: expected one argument"),
             },
             s if s.starts_with("--config=") => config = Some(s["--config=".len()..].to_string()),
-            "run" | "status" | "apply" | "check" if !seen_command => {
+            "run" | "status" | "apply" | "check" | "graphics-restore" if !seen_command => {
                 command = arg.clone();
                 seen_command = true;
             }
-            other => usage_error(&format!("argument command: invalid choice: '{other}' (choose from 'run', 'status', 'apply', 'check')")),
+            other => usage_error(&format!("argument command: invalid choice: '{other}' (choose from 'run', 'status', 'apply', 'check', 'graphics-restore')")),
         }
     }
     util::set_verbose(verbose);
@@ -63,6 +63,7 @@ fn main() {
     let code = match command.as_str() {
         "run" => service::run(&config, dry_run),
         "check" => cli::cmd_check(&config),
+        "graphics-restore" => graphics::cmd_restore(),
         "apply" => cli::cmd_status(&config, true, dry_run),
         _ => cli::cmd_status(&config, false, dry_run),
     };
